@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
-
+# This is first prototype of web scraper
 # ------------------ Utilities ------------------
 def to_iso_date(d):
     """Convert various date representations to ISO8601 string or return original if unknown."""
