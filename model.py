@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModel, AutoConfig
-
+# This the model file
 class NewsTrustModel(nn.Module):
     def __init__(self, model_name):
         super().__init__()
