@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environments
+.env
+venv/
+env/
+
+# IDE / Editor specific
+.vscode/
+.idea/
+
+# Data files
+# It's good practice to not commit large data files to git.
+# If your CSV is small, you can remove the line below.
+*.csv
+
+# Saved Models
+# Model files are typically large and shouldn't be in version control.
+*.pth
+*.pt
+*.bin
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+
+# Checkpoints
+checkpoints/
+
+# IDE Temp Files
+tempCodeRunnerFile.py
+
+# Task/temp artifacts
+task_report.txt
+eval_predictions.csv
