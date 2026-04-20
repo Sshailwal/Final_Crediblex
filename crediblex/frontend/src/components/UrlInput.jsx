@@ -23,14 +23,34 @@ const CheckIcon = () => (
   </svg>
 );
 
+// ── URL Validation ────────────────────────────────────────────────────────────
+const validateUrl = (url) => {
+  if (!url.trim()) return { valid: false, message: '' };
+
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    return { valid: false, message: '⚠️ URL must start with http:// or https://' };
+  }
+
+  const urlPattern = /^https?:\/\/([\w-]+(\.[\w-]+)+)([\w.,@?^=%&:/~+#-]*[\w@?^=%&/~+#-])?$/;
+  if (!urlPattern.test(url.trim())) {
+    return { valid: false, message: '⚠️ Please enter a valid URL  e.g. https://www.bbc.com/news/...' };
+  }
+
+  return { valid: true, message: '✓ Looks good!' };
+};
+
 export default function UrlInput({ onSubmit, loading }) {
   const [mode, setMode]   = useState('url');   // 'url' | 'text'
   const [url, setUrl]     = useState('');
   const [text, setText]   = useState('');
+  const [urlTouched, setUrlTouched] = useState(false);  // only show error after user types
 
   const charCount = text.length;
   const charOk    = charCount >= 50;
-  const isValid   = mode === 'url' ? url.trim().length > 0 : charOk;
+
+  const urlValidation = validateUrl(url);
+  const isValidUrl    = urlValidation.valid;
+  const isValid       = mode === 'url' ? isValidUrl : charOk;
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -42,6 +62,20 @@ export default function UrlInput({ onSubmit, loading }) {
     }
   };
 
+  const handleUrlChange = (e) => {
+    setUrl(e.target.value);
+    setUrlTouched(true);
+  };
+
+  const handleModeSwitch = (newMode) => {
+    setMode(newMode);
+    setUrlTouched(false);
+  };
+
+  // Decide what message to show under the URL input
+  const showError   = urlTouched && url.trim() && !isValidUrl;
+  const showSuccess = urlTouched && isValidUrl;
+
   return (
     <div className="input-card">
 
@@ -50,7 +84,7 @@ export default function UrlInput({ onSubmit, loading }) {
         <button
           id="tab-url"
           className={`input-tab ${mode === 'url' ? 'active' : ''}`}
-          onClick={() => setMode('url')}
+          onClick={() => handleModeSwitch('url')}
           type="button"
           disabled={loading}
         >
@@ -59,7 +93,7 @@ export default function UrlInput({ onSubmit, loading }) {
         <button
           id="tab-text"
           className={`input-tab ${mode === 'text' ? 'active' : ''}`}
-          onClick={() => setMode('text')}
+          onClick={() => handleModeSwitch('text')}
           type="button"
           disabled={loading}
         >
@@ -72,22 +106,39 @@ export default function UrlInput({ onSubmit, loading }) {
 
         {mode === 'url' ? (
           /* URL mode */
-          <div className="input-row">
-            <input
-              id="url-input"
-              className="url-input"
-              type="text"
-              placeholder="https://www.bbc.com/news/..."
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              disabled={loading}
-              spellCheck={false}
-              autoComplete="off"
-            />
-            <button id="analyze-url-btn" className="analyze-btn" type="submit"
-              disabled={loading || !url.trim()}>
-              {loading ? <><SpinIcon /> Analyzing…</> : <><SearchIcon /> Analyze</>}
-            </button>
+          <div>
+            <div className="input-row">
+              <input
+                id="url-input"
+                className="url-input"
+                type="text"
+                placeholder="https://www.bbc.com/news/..."
+                value={url}
+                onChange={handleUrlChange}
+                disabled={loading}
+                spellCheck={false}
+                autoComplete="off"
+                style={{
+                  borderColor: showError ? '#ef4444' : showSuccess ? '#22c55e' : undefined,
+                }}
+              />
+              <button id="analyze-url-btn" className="analyze-btn" type="submit"
+                disabled={loading || !isValidUrl}>
+                {loading ? <><SpinIcon /> Analyzing…</> : <><SearchIcon /> Analyze</>}
+              </button>
+            </div>
+
+            {/* ── Validation message ── */}
+            {urlTouched && url.trim() && (
+              <p style={{
+                marginTop: 6,
+                fontSize: '0.78rem',
+                color: showError ? '#ef4444' : '#22c55e',
+                minHeight: '1.2em',
+              }}>
+                {urlValidation.message}
+              </p>
+            )}
           </div>
         ) : (
           /* WhatsApp / Text mode */
@@ -95,11 +146,7 @@ export default function UrlInput({ onSubmit, loading }) {
             <textarea
               id="text-input"
               className="text-input"
-              placeholder="Paste a WhatsApp forward, news message, or any article text here to fact-check it…
-
-Example: 'Breaking news — the government has secretly imposed emergency rule! Forward to everyone NOW!'
-
-Minimum 50 characters."
+              placeholder={`Paste a WhatsApp forward, news message, or any article text here to fact-check it…\n\nExample: 'Breaking news — the government has secretly imposed emergency rule! Forward to everyone NOW!'\n\nMinimum 50 characters.`}
               value={text}
               onChange={(e) => setText(e.target.value)}
               disabled={loading}
