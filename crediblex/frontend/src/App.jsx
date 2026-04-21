@@ -1,11 +1,13 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import './index.css';
 import UrlInput from './components/UrlInput';
 import TrustGauge from './components/TrustGauge';
 import BiasSlider from './components/BiasSlider';
 import { FactualityBar, IntentChip, EmotionChip } from './components/Badges';
+import History from './components/History';
 
 const API = 'http://127.0.0.1:8000';
+const MAX_HISTORY = 5;
 
 const TIER_COLOR = (score) => {
   if (score >= 80) return '#22c55e';
@@ -91,10 +93,52 @@ function TextMetaCard({ meta }) {
 
 // ── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [state, setState]       = useState('idle');
-  const [report, setReport]     = useState(null);
-  const [errMsg, setErrMsg]     = useState('');
+  const [state, setState]         = useState('idle');
+  const [report, setReport]       = useState(null);
+  const [errMsg, setErrMsg]       = useState('');
   const [inputType, setInputType] = useState('url');  // 'url' | 'text'
+  const [history, setHistory]     = useState([]);
+
+  // ── Load history from localStorage on startup ──
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('crediblex_history');
+      if (saved) setHistory(JSON.parse(saved));
+    } catch {
+      setHistory([]);
+    }
+  }, []);
+
+  // ── Save a new result to history ──
+  const saveToHistory = (report, type, value) => {
+    const entry = {
+      type,
+      value,
+      title: report.metadata?.title || (type === 'text' ? value.slice(0, 60) : value),
+      score: report.score,
+      verdict: report.verdict,
+      report,
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+    setHistory(prev => {
+      const updated = [entry, ...prev].slice(0, MAX_HISTORY);
+      localStorage.setItem('crediblex_history', JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  // ── Clear history ──
+  const clearHistory = () => {
+    localStorage.removeItem('crediblex_history');
+    setHistory([]);
+  };
+
+  // ── Click a history item to restore that report ──
+  const handleHistorySelect = (item) => {
+    setReport(item.report);
+    setInputType(item.type);
+    setState('success');
+  };
 
   const analyze = async ({ type, value }) => {
     setState('loading');
@@ -118,6 +162,7 @@ export default function App() {
       }
       setReport(data);
       setState('success');
+      saveToHistory(data, type, value);   // ← save to history on success
     } catch (err) {
       setErrMsg(err.message || 'Network error — is the API running on port 8000?');
       setState('error');
@@ -145,6 +190,13 @@ export default function App() {
 
       {/* ── Input ─────────────────────────────────────────────────────────── */}
       <UrlInput onSubmit={analyze} loading={state === 'loading'} />
+
+      {/* ── History Panel ─────────────────────────────────────────────────── */}
+      <History
+        history={history}
+        onSelect={handleHistorySelect}
+        onClear={clearHistory}
+      />
 
       {/* ── Status ────────────────────────────────────────────────────────── */}
       <div className="status-area">
