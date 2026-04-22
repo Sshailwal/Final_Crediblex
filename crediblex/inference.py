@@ -9,6 +9,13 @@ Public API
 
 Both analyze_* functions return the same raw dict shape so generate_report
 works identically for both paths.
+
+Bias Fix (v2.1)
+---------------
+  Previously used a weighted-average of Left/Center/Right probabilities
+  which caused Left and Right signals to cancel out → always "Center".
+  Now uses argmax (highest probability class wins) + confidence threshold.
+  Labels "Uncertain" when max confidence < 45%.
 """
 
 import torch
@@ -42,6 +49,10 @@ EMOTION_MAP = {
     24: "remorse",   25: "sadness",    26: "surprise",    27: "neutral",
 }
 
+# ── Bias confidence threshold ──────────────────────────────────────────────────
+# If the winning bias class probability is below this, label as "Uncertain"
+BIAS_CONFIDENCE_THRESHOLD = 0.45
+
 
 def load_model():
     """Load model + tokenizer once and cache globally in a thread-safe manner."""
@@ -67,11 +78,62 @@ def load_model():
 
         temp_model.to(config.DEVICE)
         temp_model.eval()
-        
+
         _tokenizer = temp_tokenizer
         _model     = temp_model
 
     return _tokenizer, _model
+
+
+def _decode_bias(bias_logits: torch.Tensor) -> dict:
+    """
+    Decode bias logits into a label + confidence using argmax.
+
+    FIX v2.1: Replaced weighted-average approach with argmax so that
+    Left and Right signals no longer cancel each other out.
+
+    Returns
+    -------
+    dict with keys:
+        label       — "Left" / "Slightly Left" / "Center" /
+                      "Slightly Right" / "Right" / "Uncertain"
+        confidence  — float 0–1, probability of winning class
+        probs       — dict with raw Left / Center / Right probabilities
+        position    — float 0–100 for BiasSlider (0=Left, 50=Center, 100=Right)
+    """
+    probs = torch.softmax(bias_logits, dim=0)
+    p_left   = probs[0].item()
+    p_center = probs[1].item()
+    p_right  = probs[2].item()
+
+    # Argmax: winning class is the one with highest probability
+    winning_idx  = torch.argmax(probs).item()
+    winning_prob = probs[winning_idx].item()
+    base_label   = BIAS_MAP[winning_idx]   # "Left", "Center", or "Right"
+
+    # Low confidence → mark as Uncertain
+    if winning_prob < BIAS_CONFIDENCE_THRESHOLD:
+        label = "Uncertain"
+    elif base_label == "Left":
+        label = "Mostly Left"   if winning_prob >= 0.65 else "Slightly Left"
+    elif base_label == "Right":
+        label = "Mostly Right"  if winning_prob >= 0.65 else "Slightly Right"
+    else:
+        label = "Center"
+
+    # Position for BiasSlider: Left=0, Center=50, Right=100
+    position = round(p_left * 0 + p_center * 50 + p_right * 100, 1)
+
+    return {
+        "label":      label,
+        "confidence": round(winning_prob * 100, 1),
+        "probs": {
+            "left":   round(p_left   * 100, 1),
+            "center": round(p_center * 100, 1),
+            "right":  round(p_right  * 100, 1),
+        },
+        "position": position,
+    }
 
 
 def _run_model(text: str) -> dict:
@@ -83,9 +145,9 @@ def _run_model(text: str) -> dict:
 
     encoding = tokenizer(
         [text[:config.MAX_LEN * 6]],   # pre-truncate before tokeniser for memory safety
-        max_length  = config.MAX_LEN,
-        padding     = "longest",
-        truncation  = True,
+        max_length     = config.MAX_LEN,
+        padding        = "longest",
+        truncation     = True,
         return_tensors = "pt",
     )
     input_ids      = encoding["input_ids"].to(config.DEVICE)
@@ -98,25 +160,15 @@ def _run_model(text: str) -> dict:
         else:
             outputs = model(input_ids, attention_mask)
 
-    bias_logits = outputs["bias"][0]
-    bias_probs  = torch.softmax(bias_logits, dim=0)
-    # 0=Left, 1=Center, 2=Right -> map to -1, 0, 1
-    expected_bias = (bias_probs[0] * -1 + bias_probs[1] * 0 + bias_probs[2] * 1).item()
-
-    if expected_bias < -0.4: bias_label = "Mostly Left"
-    elif expected_bias < -0.1: bias_label = "Slightly Left"
-    elif expected_bias <= 0.1: bias_label = "Center"
-    elif expected_bias <= 0.4: bias_label = "Slightly Right"
-    else: bias_label = "Mostly Right"
-
-    bias_pct = (expected_bias + 1) / 2 * 100
+    # ── Bias: use new argmax decoder ──────────────────────────────────────────
+    bias_obj = _decode_bias(outputs["bias"][0])
 
     intent_idx  = torch.argmax(outputs["intent"],  dim=1).item()
     emotion_idx = torch.argmax(outputs["emotion"], dim=1).item()
     fact_score  = outputs["factuality"].item()
 
     return {
-        "bias":       {"label": bias_label, "percent": round(bias_pct, 1)},
+        "bias":       bias_obj,
         "factuality": round(fact_score, 4),
         "intent":     INTENT_MAP.get(intent_idx,  "Unknown"),
         "emotion":    EMOTION_MAP.get(emotion_idx, "Unknown"),
@@ -138,9 +190,9 @@ def analyze_url(url: str) -> dict:
 
     preds = _run_model(text)
     return {
-        "title":      title  or "Unknown",
-        "author":     author or "Unknown",
-        "date":       date   or "Unknown",
+        "title":  title  or "Unknown",
+        "author": author or "Unknown",
+        "date":   date   or "Unknown",
         **preds,
     }
 
@@ -171,16 +223,16 @@ def _extract_text_metadata(text: str) -> dict:
     likely_non_english = (non_ascii / max(len(text), 1)) > 0.20
 
     # Extract numbers / percentages / claims
-    numbers    = re.findall(r"\b\d[\d,]*(?:\.\d+)?%?\b", text)
+    numbers      = re.findall(r"\b\d[\d,]*(?:\.\d+)?%?\b", text)
     claims_count = len(numbers)
 
     return {
-        "word_count":         word_count,
-        "estimated_read_time": read_time,
-        "contains_url":       has_url,
-        "looks_like_forward": is_forward,
-        "likely_non_english": likely_non_english,
-        "numeric_claims_count": claims_count,
+        "word_count":            word_count,
+        "estimated_read_time":   read_time,
+        "contains_url":          has_url,
+        "looks_like_forward":    is_forward,
+        "likely_non_english":    likely_non_english,
+        "numeric_claims_count":  claims_count,
     }
 
 
@@ -188,22 +240,13 @@ def analyze_text(text: str) -> dict:
     """
     Analyse raw pasted text (WhatsApp forwards, copied articles, etc.)
     without any web scraping.
-
-    Parameters
-    ----------
-    text : str
-        The raw message / article body.
-
-    Returns
-    -------
-    dict — same shape as analyze_url() with an extra 'text_metadata' key.
     """
     text = (text or "").strip()
     if len(text) < 50:
         return {"error": "Text is too short for meaningful analysis (minimum 50 characters)."}
 
-    preds    = _run_model(text)
-    meta     = _extract_text_metadata(text)
+    preds = _run_model(text)
+    meta  = _extract_text_metadata(text)
 
     # Use first sentence / 120 chars as a pseudo-title
     first_sentence = re.split(r"[.!?\n]", text)[0].strip()
@@ -237,9 +280,12 @@ EMOTION_CREDIBILITY = {
 
 INTENT_CREDIBILITY = {"News": 1.0, "Opinion": 0.5, "Satire": 0.0}
 BIAS_CREDIBILITY   = {
-    "Mostly Left": 0.0, "Slightly Left": 0.5,
-    "Center": 1.0,
-    "Slightly Right": 0.5, "Mostly Right": 0.0
+    "Mostly Left":    0.0,
+    "Slightly Left":  0.5,
+    "Center":         1.0,
+    "Slightly Right": 0.5,
+    "Mostly Right":   0.0,
+    "Uncertain":      0.4,   # small penalty for uncertain bias
 }
 
 
@@ -263,11 +309,14 @@ def _verdict(score: float) -> str:
     return "Very Low Credibility"
 
 
-def _bullet_findings(factuality: float, bias: str, intent: str,
+def _bullet_findings(factuality: float, bias_obj: dict, intent: str,
                      emotion: str, score: float) -> list:
     """Generate bullet-point key findings for the report."""
-    findings = []
-    fact_pct = round(factuality * 100)
+    findings  = []
+    fact_pct  = round(factuality * 100)
+    bias      = bias_obj["label"]
+    conf      = bias_obj["confidence"]
+    probs     = bias_obj.get("probs", {})
 
     # Factuality
     if fact_pct >= 70:
@@ -277,13 +326,14 @@ def _bullet_findings(factuality: float, bias: str, intent: str,
     else:
         findings.append({"icon": "🚨", "text": f"Low factuality score ({fact_pct}%) — content may be misleading, exaggerated or fabricated.", "type": "bad"})
 
-    # Bias
+    # Bias — with confidence info
     bias_msgs = {
-        "Mostly Left":    {"icon": "◀️",  "text": "Strong left-leaning political tone detected.", "type": "warn"},
-        "Slightly Left":  {"icon": "◁",   "text": "Slight left-leaning perspective detected.", "type": "info"},
-        "Center":         {"icon": "⚖️",  "text": "Politically balanced / centre-leaning perspective.", "type": "good"},
-        "Slightly Right": {"icon": "▷",   "text": "Slight right-leaning perspective detected.", "type": "info"},
-        "Mostly Right":   {"icon": "▶️",  "text": "Strong right-leaning political tone detected.", "type": "warn"},
+        "Mostly Left":    {"icon": "◀️",  "text": f"Strong left-leaning political tone detected ({conf}% confidence).", "type": "warn"},
+        "Slightly Left":  {"icon": "◁",   "text": f"Slight left-leaning perspective detected ({conf}% confidence).", "type": "info"},
+        "Center":         {"icon": "⚖️",  "text": f"Politically balanced / centre-leaning perspective ({conf}% confidence).", "type": "good"},
+        "Slightly Right": {"icon": "▷",   "text": f"Slight right-leaning perspective detected ({conf}% confidence).", "type": "info"},
+        "Mostly Right":   {"icon": "▶️",  "text": f"Strong right-leaning political tone detected ({conf}% confidence).", "type": "warn"},
+        "Uncertain":      {"icon": "❓",  "text": f"Political bias unclear — model confidence too low ({conf}%). Left: {probs.get('left')}%, Center: {probs.get('center')}%, Right: {probs.get('right')}%.", "type": "warn"},
     }
     if bias in bias_msgs:
         findings.append(bias_msgs[bias])
@@ -320,12 +370,16 @@ def generate_report(raw: dict) -> dict:
         return raw
 
     factuality = raw.get("factuality", 0.5)
-    bias_obj   = raw.get("bias",       {"label": "Center", "percent": 50})
+    bias_obj   = raw.get("bias", {"label": "Uncertain", "confidence": 0.0,
+                                   "probs": {"left": 33, "center": 34, "right": 33},
+                                   "position": 50})
     bias_label = bias_obj["label"]
-    bias_pct   = bias_obj["percent"]
-    
-    intent     = raw.get("intent",     "News")
-    emotion    = raw.get("emotion",    "neutral")
+    bias_conf  = bias_obj["confidence"]
+    bias_probs = bias_obj.get("probs", {})
+    bias_pos   = bias_obj.get("position", 50)
+
+    intent  = raw.get("intent",  "News")
+    emotion = raw.get("emotion", "neutral")
 
     score   = compute_trust_score(factuality, bias_label, intent, emotion)
     verdict = _verdict(score)
@@ -334,6 +388,28 @@ def generate_report(raw: dict) -> dict:
     bias_cred = BIAS_CREDIBILITY.get(bias_label, 0.5)
     int_cred  = INTENT_CREDIBILITY.get(intent, 0.5)
     emo_cred  = EMOTION_CREDIBILITY.get(emotion, 0.5)
+
+    # Bias explanation with raw probabilities
+    if bias_label == "Uncertain":
+        bias_explanation = (
+            f"Model confidence was too low ({bias_conf}%) to determine a clear bias. "
+            f"Raw probabilities — Left: {bias_probs.get('left')}%, "
+            f"Center: {bias_probs.get('center')}%, "
+            f"Right: {bias_probs.get('right')}%. "
+            f"This may indicate a genuinely balanced article or an out-of-domain source."
+        )
+    elif bias_label == "Center":
+        bias_explanation = (
+            f"Political bias detected as '{bias_label}' with {bias_conf}% confidence. "
+            f"(Left: {bias_probs.get('left')}%, Center: {bias_probs.get('center')}%, Right: {bias_probs.get('right')}%). "
+            f"Centre-leaning sources tend to present more balanced perspectives."
+        )
+    else:
+        bias_explanation = (
+            f"Political bias detected as '{bias_label}' with {bias_conf}% confidence. "
+            f"(Left: {bias_probs.get('left')}%, Center: {bias_probs.get('center')}%, Right: {bias_probs.get('right')}%). "
+            f"A {bias_label.lower()}-leaning source introduces perspective bias, reducing the trust score."
+        )
 
     dimensions = {
         "factuality": {
@@ -349,15 +425,12 @@ def generate_report(raw: dict) -> dict:
         },
         "bias": {
             "value":            bias_label,
-            "position":         bias_pct,
+            "position":         bias_pos,
+            "confidence":       bias_conf,
+            "probs":            bias_probs,
             "contribution_pct": round(bias_cred * 0.20 * 100, 1),
             "weight":           "20%",
-            "explanation": (
-                f"Political bias detected as '{bias_label}'. " +
-                ("Centre-leaning sources tend to present more balanced perspectives."
-                 if bias_label == "Center" else
-                 f"A {bias_label.lower()}-leaning source introduces perspective bias, reducing the trust score.")
-            ),
+            "explanation":      bias_explanation,
         },
         "intent": {
             "value":            intent,
@@ -388,7 +461,7 @@ def generate_report(raw: dict) -> dict:
     summary = (
         f"This content scores {score}/100 ({verdict}): "
         f"factuality at {fact_pct}%, "
-        f"{bias_label.lower()}-leaning political tone, "
+        f"{bias_label.lower()}-leaning political tone ({bias_conf}% confidence), "
         f"classified as {intent.lower()} content, "
         f"with a dominant '{emotion}' emotional signal."
     )
@@ -397,8 +470,8 @@ def generate_report(raw: dict) -> dict:
         "score":         score,
         "verdict":       verdict,
         "dimensions":    dimensions,
-        "key_findings":  _bullet_findings(factuality, bias_label, intent, emotion, score),
-        "text_metadata": raw.get("text_metadata"),   # None for URL analysis
+        "key_findings":  _bullet_findings(factuality, bias_obj, intent, emotion, score),
+        "text_metadata": raw.get("text_metadata"),
         "metadata": {
             "title":  raw.get("title",  "Unknown"),
             "author": raw.get("author", "Unknown"),
@@ -432,6 +505,5 @@ if __name__ == "__main__":
     raw    = analyze_text(wa_text)
     report = generate_report(raw)
     print(f"  Score  : {report.get('score')} / 100  →  {report.get('verdict')}")
-    print(f"  Findings:")
     for f in report.get("key_findings", []):
         print(f"    {f['icon']} {f['text']}")

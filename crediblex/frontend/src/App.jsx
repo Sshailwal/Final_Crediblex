@@ -13,7 +13,7 @@ const TIER_COLOR = (score) => {
   if (score >= 80) return '#22c55e';
   if (score >= 60) return '#84cc16';
   if (score >= 40) return '#eab308';
-  if (score >= 20) return '#f97316';
+  if (score >= 20) return '#f77417';
   return '#ef4444';
 };
 
