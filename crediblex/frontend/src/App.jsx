@@ -17,6 +17,71 @@ const TIER_COLOR = (score) => {
   return '#ef4444';
 };
 
+// ── Copy Report Button ────────────────────────────────────────────────────────
+function CopyReportButton({ report, inputType }) {
+  const [copied, setCopied] = useState(false);
+
+  const buildText = () => {
+    const dim = report?.dimensions || {};
+    const findings = (report.key_findings || []).map(f => `  • ${f.text}`).join('\n');
+    const source = inputType === 'text' ? '[Pasted Text]' : (report.metadata?.title || 'Unknown');
+
+    return [
+      '📊 CredibleX Analysis Report',
+      '─'.repeat(34),
+      `📰 Title   : ${source}`,
+      `⭐ Score   : ${report.score}/100`,
+      `✅ Verdict : ${report.verdict}`,
+      '',
+      '📊 Dimensions:',
+      `  🧾 Factuality : ${Math.round((dim.factuality?.value ?? 0) * 100)}%`,
+      `  ⚖️  Bias       : ${dim.bias?.value ?? 'N/A'}`,
+      `  🎯 Intent     : ${dim.intent?.value ?? 'N/A'}`,
+      `  😤 Emotion    : ${dim.emotion?.value ?? 'N/A'}`,
+      '',
+      findings ? `📋 Key Findings:\n${findings}` : '',
+      '',
+      `🤖 Summary:\n${report.summary || 'N/A'}`,
+      '',
+      '─'.repeat(34),
+      `Analyzed by CredibleX • ${new Date().toLocaleString()}`,
+    ].filter(line => line !== null).join('\n');
+  };
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(buildText());
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    } catch {
+      alert('Could not copy — please copy manually.');
+    }
+  };
+
+  return (
+    <button
+      onClick={handleCopy}
+      style={{
+        display:     'flex',
+        alignItems:  'center',
+        gap:         6,
+        margin:      '0 auto 20px auto',
+        padding:     '9px 20px',
+        background:  copied ? 'rgba(34,197,94,0.12)' : 'rgba(108,99,255,0.12)',
+        border:      `1px solid ${copied ? 'rgba(34,197,94,0.35)' : 'rgba(108,99,255,0.35)'}`,
+        borderRadius: 10,
+        color:       copied ? '#4ade80' : '#a78bfa',
+        fontSize:    '0.82rem',
+        fontWeight:  600,
+        cursor:      'pointer',
+        transition:  'all 0.2s',
+      }}
+    >
+      {copied ? '✅ Copied!' : '📋 Copy Report'}
+    </button>
+  );
+}
+
 // ── Key Findings bullet list ──────────────────────────────────────────────────
 function KeyFindings({ findings }) {
   if (!findings || findings.length === 0) return null;
@@ -96,7 +161,7 @@ export default function App() {
   const [state, setState]         = useState('idle');
   const [report, setReport]       = useState(null);
   const [errMsg, setErrMsg]       = useState('');
-  const [inputType, setInputType] = useState('url');  // 'url' | 'text'
+  const [inputType, setInputType] = useState('url');
   const [history, setHistory]     = useState([]);
 
   // ── Load history from localStorage on startup ──
@@ -162,7 +227,7 @@ export default function App() {
       }
       setReport(data);
       setState('success');
-      saveToHistory(data, type, value);   // ← save to history on success
+      saveToHistory(data, type, value);
     } catch (err) {
       setErrMsg(err.message || 'Network error — is the API running on port 8000?');
       setState('error');
@@ -238,6 +303,9 @@ export default function App() {
             </div>
             <p className="report-summary">{report.summary}</p>
           </div>
+
+          {/* ── Copy Report Button ── */}
+          <CopyReportButton report={report} inputType={inputType} />
 
           {/* WhatsApp Message Details */}
           {isText && <TextMetaCard meta={report.text_metadata} />}
