@@ -37,7 +37,13 @@ _model     = None
 _model_lock = threading.Lock()
 
 # ── Label mappings ─────────────────────────────────────────────────────────────
-BIAS_MAP   = {0: "Left", 1: "Center", 2: "Right"}
+BIAS_MAP = {
+    0: "Far Left",
+    1: "Slightly Left",
+    2: "Center",
+    3: "Slightly Right",
+    4: "Far Right",
+}
 INTENT_MAP = {0: "News", 1: "Opinion", 2: "Satire"}
 EMOTION_MAP = {
     0: "admiration", 1: "amusement",   2: "anger",       3: "annoyance",
@@ -50,8 +56,15 @@ EMOTION_MAP = {
 }
 
 # ── Bias confidence threshold ──────────────────────────────────────────────────
-# If the winning bias class probability is below this, label as "Uncertain"
-BIAS_CONFIDENCE_THRESHOLD = 0.45
+# 5-class model: random baseline = 20%, so 30% is a meaningful signal
+BIAS_CONFIDENCE_THRESHOLD = 0.30
+
+# ── Indian political context keywords ───────────────────────────────────────────────
+INDIA_KEYWORDS = [
+    "modi", "bjp", "aap", "kejriwal", "rahul gandhi", "lok sabha",
+    "rajya sabha", "india election", "ndtv", "the hindu", "narendra",
+    "amit shah", "yogi", "mamata", "indian parliament", "ayodhya",
+]
 
 
 def load_model():
@@ -87,50 +100,36 @@ def load_model():
 
 def _decode_bias(bias_logits: torch.Tensor) -> dict:
     """
-    Decode bias logits into a label + confidence using argmax.
+    Decode 5-class bias logits into a human label + confidence.
 
-    FIX v2.1: Replaced weighted-average approach with argmax so that
-    Left and Right signals no longer cancel each other out.
+    5-class mapping:
+      0 = Far Left | 1 = Slightly Left | 2 = Center |
+      3 = Slightly Right | 4 = Far Right
 
-    Returns
-    -------
-    dict with keys:
-        label       — "Left" / "Slightly Left" / "Center" /
-                      "Slightly Right" / "Right" / "Uncertain"
-        confidence  — float 0–1, probability of winning class
-        probs       — dict with raw Left / Center / Right probabilities
-        position    — float 0–100 for BiasSlider (0=Left, 50=Center, 100=Right)
+    Position for BiasSlider: 0 (Far Left) → 50 (Center) → 100 (Far Right)
     """
     probs = torch.softmax(bias_logits, dim=0)
-    p_left   = probs[0].item()
-    p_center = probs[1].item()
-    p_right  = probs[2].item()
+    p = [probs[i].item() for i in range(5)]
 
-    # Argmax: winning class is the one with highest probability
-    winning_idx  = torch.argmax(probs).item()
-    winning_prob = probs[winning_idx].item()
-    base_label   = BIAS_MAP[winning_idx]   # "Left", "Center", or "Right"
+    winning_idx  = int(torch.argmax(probs).item())
+    winning_prob = p[winning_idx]
 
-    # Low confidence → mark as Uncertain
+    label = BIAS_MAP[winning_idx]
     if winning_prob < BIAS_CONFIDENCE_THRESHOLD:
         label = "Uncertain"
-    elif base_label == "Left":
-        label = "Mostly Left"   if winning_prob >= 0.65 else "Slightly Left"
-    elif base_label == "Right":
-        label = "Mostly Right"  if winning_prob >= 0.65 else "Slightly Right"
-    else:
-        label = "Center"
 
-    # Position for BiasSlider: Left=0, Center=50, Right=100
-    position = round(p_left * 0 + p_center * 50 + p_right * 100, 1)
+    # Weighted position: Far-Left=0, Slightly-Left=25, Center=50, Slightly-Right=75, Far-Right=100
+    position = round(p[0]*0 + p[1]*25 + p[2]*50 + p[3]*75 + p[4]*100, 1)
 
     return {
         "label":      label,
         "confidence": round(winning_prob * 100, 1),
         "probs": {
-            "left":   round(p_left   * 100, 1),
-            "center": round(p_center * 100, 1),
-            "right":  round(p_right  * 100, 1),
+            "far_left":      round(p[0] * 100, 1),
+            "slightly_left": round(p[1] * 100, 1),
+            "center":        round(p[2] * 100, 1),
+            "slightly_right":round(p[3] * 100, 1),
+            "far_right":     round(p[4] * 100, 1),
         },
         "position": position,
     }
@@ -280,11 +279,11 @@ EMOTION_CREDIBILITY = {
 
 INTENT_CREDIBILITY = {"News": 1.0, "Opinion": 0.5, "Satire": 0.0}
 BIAS_CREDIBILITY   = {
-    "Mostly Left":    0.0,
+    "Far Left":       0.0,
     "Slightly Left":  0.5,
     "Center":         1.0,
     "Slightly Right": 0.5,
-    "Mostly Right":   0.0,
+    "Far Right":      0.0,
     "Uncertain":      0.4,   # small penalty for uncertain bias
 }
 
@@ -371,8 +370,7 @@ def generate_report(raw: dict) -> dict:
 
     factuality = raw.get("factuality", 0.5)
     bias_obj   = raw.get("bias", {"label": "Uncertain", "confidence": 0.0,
-                                   "probs": {"left": 33, "center": 34, "right": 33},
-                                   "position": 50})
+                                   "probs": {}, "position": 50})
     bias_label = bias_obj["label"]
     bias_conf  = bias_obj["confidence"]
     bias_probs = bias_obj.get("probs", {})
@@ -389,26 +387,35 @@ def generate_report(raw: dict) -> dict:
     int_cred  = INTENT_CREDIBILITY.get(intent, 0.5)
     emo_cred  = EMOTION_CREDIBILITY.get(emotion, 0.5)
 
+    # Detect Indian political context from raw text metadata
+    source_text = raw.get("_source_text", "").lower()
+    is_indian_context = any(kw in source_text for kw in INDIA_KEYWORDS)
+    indian_note = (
+        " \u26a0\ufe0f Indian political context detected — predictions reflect training on "
+        "Indian political news data."
+        if is_indian_context else ""
+    )
+
     # Bias explanation with raw probabilities
+    probs_str = ", ".join(f"{k.replace('_',' ').title()}: {v}%" for k, v in bias_probs.items())
     if bias_label == "Uncertain":
         bias_explanation = (
             f"Model confidence was too low ({bias_conf}%) to determine a clear bias. "
-            f"Raw probabilities — Left: {bias_probs.get('left')}%, "
-            f"Center: {bias_probs.get('center')}%, "
-            f"Right: {bias_probs.get('right')}%. "
-            f"This may indicate a genuinely balanced article or an out-of-domain source."
+            f"Raw probabilities — {probs_str}. "
+            f"This may indicate a genuinely balanced article or an out-of-domain source.{indian_note}"
         )
     elif bias_label == "Center":
         bias_explanation = (
             f"Political bias detected as '{bias_label}' with {bias_conf}% confidence. "
-            f"(Left: {bias_probs.get('left')}%, Center: {bias_probs.get('center')}%, Right: {bias_probs.get('right')}%). "
-            f"Centre-leaning sources tend to present more balanced perspectives."
+            f"({probs_str}). "
+            f"Centre-leaning sources tend to present more balanced perspectives.{indian_note}"
         )
     else:
         bias_explanation = (
             f"Political bias detected as '{bias_label}' with {bias_conf}% confidence. "
-            f"(Left: {bias_probs.get('left')}%, Center: {bias_probs.get('center')}%, Right: {bias_probs.get('right')}%). "
-            f"A {bias_label.lower()}-leaning source introduces perspective bias, reducing the trust score."
+            f"({probs_str}). "
+            f"A {bias_label.lower()}-leaning source introduces perspective bias, "
+            f"reducing the trust score.{indian_note}"
         )
 
     dimensions = {
@@ -463,7 +470,7 @@ def generate_report(raw: dict) -> dict:
         f"factuality at {fact_pct}%, "
         f"{bias_label.lower()}-leaning political tone ({bias_conf}% confidence), "
         f"classified as {intent.lower()} content, "
-        f"with a dominant '{emotion}' emotional signal."
+        f"with a dominant '{emotion}' emotional signal.{indian_note}"
     )
 
     return {

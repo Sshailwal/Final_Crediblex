@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModel
+import config
 
 
 class NewsTrustModel(nn.Module):
@@ -8,7 +9,7 @@ class NewsTrustModel(nn.Module):
     Multi-task DeBERTa-v3-base model for news credibility scoring.
 
     Four output heads trained jointly:
-      bias_head      → 3-class (Left / Center / Right)
+      bias_head      → N_BIAS_CLASSES-class (Far-Left / Slightly Left / Center / Slightly Right / Far-Right)
       fact_head      → regression scalar in [0, 1]  (factuality)
       intent_head    → 3-class (News / Opinion / Satire)
       emotion_head   → 28-class (GoEmotions)
@@ -20,6 +21,8 @@ class NewsTrustModel(nn.Module):
       DeBERTa trains [CLS] with disentangled attention, not as a pooling token.
     • Shared dropout(0.1) applied to the pooled embedding before every head
       to regularise all tasks equally and prevent overfitting.
+    • Bias head is 5-class (config.N_BIAS_CLASSES) for finer-grained
+      Left ↔ Center ↔ Right detection.
     """
 
     def __init__(self, model_name: str, dropout: float = 0.1):
@@ -31,7 +34,9 @@ class NewsTrustModel(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         # ── Classification / regression heads ──────────────────────────────
-        self.bias_head    = nn.Linear(hidden, 3)   # Left / Center / Right
+        # bias_head uses config.N_BIAS_CLASSES (= 5):
+        #   0 = Far Left | 1 = Slightly Left | 2 = Center | 3 = Slightly Right | 4 = Far Right
+        self.bias_head    = nn.Linear(hidden, config.N_BIAS_CLASSES)
         self.fact_head    = nn.Linear(hidden, 1)   # factuality regression
         self.intent_head  = nn.Linear(hidden, 3)   # News / Opinion / Satire
         self.emotion_head = nn.Linear(hidden, 28)  # GoEmotions 28-class
