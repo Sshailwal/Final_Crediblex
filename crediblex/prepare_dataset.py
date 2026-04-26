@@ -1,3 +1,4 @@
+# emotion_label: int→multihot
 # coding: utf-8
 """
 prepare_dataset.py - CredibleX Dataset Builder v4
@@ -23,6 +24,17 @@ import os, sys, argparse, datetime, shutil
 import pandas as pd
 from tqdm import tqdm
 from datasets import load_dataset
+import json
+
+def to_multihot(labels, n=28):
+    """Convert single label or list of labels to JSON multi-hot string."""
+    if isinstance(labels, (int, float)):
+        labels = [int(labels)]
+    vec = [0.0] * n
+    for l in labels:
+        if 0 <= l < n:
+            vec[l] = 1.0
+    return json.dumps(vec)
 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 if hasattr(sys.stdout, "reconfigure"):
@@ -68,13 +80,30 @@ DAIR_TO_GO = {0: 25, 1: 17, 2: 18, 3: 2, 4: 14, 5: 26}
 
 
 def _row(text, bias, fact, intent, emotion, region):
+    # Bug 11: emotion_label is now a JSON multi-hot string
+    if isinstance(emotion, list):
+        primary = int(emotion[0]) if emotion else 27
+        emo_str = to_multihot(emotion)
+    elif isinstance(emotion, (int, float)):
+        primary = int(emotion)
+        emo_str = to_multihot(emotion)
+    else:
+        # Fallback for strings
+        emo_str = emotion
+        try:
+            vec = json.loads(emotion)
+            primary = vec.index(1.0) if 1.0 in vec else 27
+        except:
+            primary = 27
+
     return {
         "text":          str(text).strip()[:3000],
         "bias_label":    int(bias),
         "fact_score":    float(fact),
         "intent_label":  int(intent),
-        "emotion_label": int(emotion),
+        "emotion_label": emo_str,
         "region":        str(region),
+        "_primary_emotion": primary,
     }
 
 
@@ -232,12 +261,19 @@ def load_emotions(go_limit=18000, neutral_cap=3000, dair_limit=6000):
             if len(text) < 10:
                 continue
             labels = r.get("labels", [])
-            emo    = int(labels[0]) if isinstance(labels, list) and labels else 27
-            if emo == 27:
+            # Bug 11: GoEmotions provides a list of labels
+            emo_str = to_multihot(labels)
+            
+            # Primary emotion for factuality proxy
+            primary_emo = int(labels[0]) if isinstance(labels, list) and labels else 27
+            
+            if primary_emo == 27:
                 if neutral_count >= neutral_cap:
                     continue
                 neutral_count += 1
-            rows.append(_row(text, 2, EMO_FACT.get(emo, 0.5), 1, emo, "other"))
+            
+            # Bug 10: intent_label=0 for GoEmotions
+            rows.append(_row(text, 2, EMO_FACT.get(primary_emo, 0.5), 0, emo_str, "other"))
         print("  [OK] GoEmotions: {:,} (neutral={:,})".format(len(rows), neutral_count))
     except Exception as e:
         print("  [SKIP] GoEmotions: {}".format(e))
@@ -260,7 +296,8 @@ def load_emotions(go_limit=18000, neutral_cap=3000, dair_limit=6000):
             emo = DAIR_TO_GO.get(int(r.get("label", 0)), 27)
             if emo == 27:
                 continue
-            rows.append(_row(text, 2, EMO_FACT.get(emo, 0.5), 1, emo, "other"))
+            # Bug 10: intent_label=0 for dair-ai
+            rows.append(_row(text, 2, EMO_FACT.get(emo, 0.5), 0, emo, "other"))
             added += 1
         print("  [OK] dair: {:,} added".format(added))
     except Exception as e:
@@ -379,13 +416,13 @@ def balance_emotion(df, neutral_cap=0.30, floor=300):
     geo_rows   = df[df["region"].isin(["US", "India"])].copy()
     other_rows = df[df["region"] == "other"].copy()
 
-    neutral_geo   = geo_rows[geo_rows["emotion_label"] == 27]
+    neutral_geo   = geo_rows[geo_rows["_primary_emotion"] == 27]
     non_neutral   = pd.concat([
-        geo_rows[geo_rows["emotion_label"] != 27],
-        other_rows[other_rows["emotion_label"] != 27],
+        geo_rows[geo_rows["_primary_emotion"] != 27],
+        other_rows[other_rows["_primary_emotion"] != 27],
     ], ignore_index=True)
 
-    neutral_other = other_rows[other_rows["emotion_label"] == 27]
+    neutral_other = other_rows[other_rows["_primary_emotion"] == 27]
 
     # How many neutral are OK overall?
     total_non_neutral  = len(non_neutral)
@@ -406,7 +443,7 @@ def balance_emotion(df, neutral_cap=0.30, floor=300):
     # Upsample non-neutral emotion classes to floor
     parts = [neutral_df]
     for emo in range(27):
-        sub = non_neutral[non_neutral["emotion_label"] == emo].copy()
+        sub = non_neutral[non_neutral["_primary_emotion"] == emo].copy()
         if len(sub) == 0:
             continue
         if len(sub) < floor:
@@ -416,8 +453,8 @@ def balance_emotion(df, neutral_cap=0.30, floor=300):
 
     result  = pd.concat(parts, ignore_index=True).sample(frac=1, random_state=42)
     total_r = len(result)
-    n_cnt   = len(result[result["emotion_label"] == 27])
-    n_pct   = n_cnt / total_r * 100
+    n_cnt   = len(result[result["_primary_emotion"] == 27])
+    n_pct   = n_cnt / max(total_r, 1) * 100
     print("  Neutral {:.1f}% (target <={:.0f}%)  total={:,}".format(
         n_pct, neutral_cap * 100, total_r))
     return result.reset_index(drop=True)
@@ -456,13 +493,13 @@ def assert_distribution(df, raw_bias_counts=None):
                 cls, BIAS_NAMES[cls], pct))
 
     # Emotion
-    neutral_cnt = len(df[df["emotion_label"] == 27])
+    neutral_cnt = len(df[df["_primary_emotion"] == 27])
     neutral_pct = neutral_cnt / total * 100
     print("\n  EMOTION: neutral {:,} ({:.1f}%)".format(neutral_cnt, neutral_pct))
     if neutral_pct > 95.0:
         errors.append("Neutral {:.1f}% > 95% (too many geo rows dominating)".format(neutral_pct))
 
-    emo_counts = {c: len(df[df["emotion_label"] == c]) for c in range(28)}
+    emo_counts = {c: len(df[df["_primary_emotion"] == c]) for c in range(28)}
     too_small = [f"emo{c}={n}" for c, n in sorted(emo_counts.items()) if n < 50 and c != 27]
     if too_small:
         print("  [WARN] Checkable emotion classes < 50 rows: {}".format(too_small))
@@ -549,6 +586,10 @@ def build_dataset(output_path="training_data.csv"):
         backup = output_path.replace(".csv", "_backup_{}.csv".format(ts))
         shutil.copy2(output_path, backup)
         print("\n  Backed up -> {}".format(backup))
+
+    # Cleanup
+    if "_primary_emotion" in df.columns:
+        df = df.drop(columns=["_primary_emotion"])
 
     df.to_csv(output_path, index=False)
     print("  Saved {:,} rows -> {}".format(len(df), output_path))

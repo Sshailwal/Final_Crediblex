@@ -6,14 +6,30 @@ class ArticleRecord(BaseModel):
     text: str
     
     # The 4 Targets (Labels) we want to predict
-    bias_label: int  # 0: Left, 1: Center, 2: Right
+    # 0: Far-Left, 1: Slightly-Left, 2: Center, 3: Slightly-Right, 4: Far-Right
+    bias_label: int
     fact_score: float # 0.0 (Fake) to 1.0 (True)
     intent_label: int # 0: News, 1: Opinion, 2: Satire
-    emotion_label: int # 0: Neutral, 1: Anger, 2: Joy, etc. (Simplified)
+    # Bug 11: emotion_label is now a JSON multi-hot string "[0,1,0,...]" (28 values)
+    emotion_label: str
 
     @field_validator('fact_score')
     @classmethod
-    def check_range(cls, v):
+    def check_fact_range(cls, v):
         if not (0.0 <= v <= 1.0):
             raise ValueError("Fact score must be between 0 and 1")
+        return v
+
+    @field_validator('bias_label')
+    @classmethod
+    def check_bias_range(cls, v):
+        if not (0 <= v <= 4):
+            raise ValueError("Bias label must be between 0 and 4")
+        return v
+
+    @field_validator('intent_label')
+    @classmethod
+    def check_intent_range(cls, v):
+        if not (0 <= v <= 2):
+            raise ValueError("Intent label must be between 0 and 2")
         return v

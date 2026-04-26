@@ -1,3 +1,4 @@
+# emotion_label: int→multihot
 """
 inference.py — CredibleX Model Inference
 ==========================================
@@ -142,35 +143,64 @@ def _run_model(text: str) -> dict:
     """
     tokenizer, model = load_model()
 
-    encoding = tokenizer(
-        [text[:config.MAX_LEN * 6]],   # pre-truncate before tokeniser for memory safety
-        max_length     = config.MAX_LEN,
-        padding        = "longest",
-        truncation     = True,
-        return_tensors = "pt",
-    )
-    input_ids      = encoding["input_ids"].to(config.DEVICE)
-    attention_mask = encoding["attention_mask"].to(config.DEVICE)
+    w_ids, w_masks = NewsTrustModel.create_sliding_windows(text, tokenizer, config.MAX_LEN)
 
-    with torch.no_grad():
-        if config.DEVICE == "cuda":
+    with torch.inference_mode():
+        pooled_embs = []
+        for wid, wmask in zip(w_ids, w_masks):
+            wid = wid.unsqueeze(0).to(config.DEVICE)
+            wmask = wmask.unsqueeze(0).to(config.DEVICE)
+
+            if config.DEVICE.type == "cuda":
+                with torch.amp.autocast("cuda"):
+                    outputs = model.backbone(input_ids=wid, attention_mask=wmask)
+                    pooled = model._mean_pool(outputs.last_hidden_state, wmask)
+            else:
+                outputs = model.backbone(input_ids=wid, attention_mask=wmask)
+                pooled = model._mean_pool(outputs.last_hidden_state, wmask)
+
+            pooled_embs.append(pooled)
+
+        avg_pooled = torch.stack(pooled_embs).mean(dim=0)
+
+        if config.DEVICE.type == "cuda":
             with torch.amp.autocast("cuda"):
-                outputs = model(input_ids, attention_mask)
+                bias_logits = model.bias_head(avg_pooled)
+                fact_score = torch.sigmoid(model.fact_head(avg_pooled))
+                intent_logits = model.intent_head(avg_pooled)
+                emotion_logits = model.emotion_head(avg_pooled)
         else:
-            outputs = model(input_ids, attention_mask)
+            bias_logits = model.bias_head(avg_pooled)
+            fact_score = torch.sigmoid(model.fact_head(avg_pooled))
+            intent_logits = model.intent_head(avg_pooled)
+            emotion_logits = model.emotion_head(avg_pooled)
 
     # ── Bias: use new argmax decoder ──────────────────────────────────────────
-    bias_obj = _decode_bias(outputs["bias"][0])
+    bias_obj = _decode_bias(bias_logits[0])
 
-    intent_idx  = torch.argmax(outputs["intent"],  dim=1).item()
-    emotion_idx = torch.argmax(outputs["emotion"], dim=1).item()
-    fact_score  = outputs["factuality"].item()
+    intent_idx  = torch.argmax(intent_logits,  dim=1).item()
+    
+    # Bug 11: Multi-label emotion decoding (sigmoid + threshold)
+    emo_probs = torch.sigmoid(emotion_logits[0])
+    top_indices = torch.where(emo_probs > 0.5)[0]
+    
+    # Primary = highest sigmoid score
+    primary_idx = torch.argmax(emo_probs).item()
+    primary_emotion = EMOTION_MAP.get(primary_idx, "Unknown")
+    
+    # All above threshold
+    all_emotions = [EMOTION_MAP.get(idx.item(), "Unknown") for idx in top_indices]
+    if not all_emotions:
+        all_emotions = [primary_emotion]
+        
+    fact_val  = fact_score.item()
 
     return {
         "bias":       bias_obj,
-        "factuality": round(fact_score, 4),
+        "factuality": round(fact_val, 4),
         "intent":     INTENT_MAP.get(intent_idx,  "Unknown"),
-        "emotion":    EMOTION_MAP.get(emotion_idx, "Unknown"),
+        "emotion":    primary_emotion,
+        "all_emotions": all_emotions,
     }
 
 
@@ -192,6 +222,7 @@ def analyze_url(url: str) -> dict:
         "title":  title  or "Unknown",
         "author": author or "Unknown",
         "date":   date   or "Unknown",
+        "_source_text": text,
         **preds,
     }
 
@@ -255,6 +286,7 @@ def analyze_text(text: str) -> dict:
         "title":         pseudo_title or text[:80] + "…",
         "author":        "Unknown (raw text / WhatsApp)",
         "date":          "Unknown",
+        "_source_text":  text,
         "text_metadata": meta,
         **preds,
     }
@@ -327,12 +359,12 @@ def _bullet_findings(factuality: float, bias_obj: dict, intent: str,
 
     # Bias — with confidence info
     bias_msgs = {
-        "Mostly Left":    {"icon": "◀️",  "text": f"Strong left-leaning political tone detected ({conf}% confidence).", "type": "warn"},
+        "Far Left":       {"icon": "◀️",  "text": f"Strong left-leaning political tone detected ({conf}% confidence).", "type": "warn"},
         "Slightly Left":  {"icon": "◁",   "text": f"Slight left-leaning perspective detected ({conf}% confidence).", "type": "info"},
         "Center":         {"icon": "⚖️",  "text": f"Politically balanced / centre-leaning perspective ({conf}% confidence).", "type": "good"},
         "Slightly Right": {"icon": "▷",   "text": f"Slight right-leaning perspective detected ({conf}% confidence).", "type": "info"},
-        "Mostly Right":   {"icon": "▶️",  "text": f"Strong right-leaning political tone detected ({conf}% confidence).", "type": "warn"},
-        "Uncertain":      {"icon": "❓",  "text": f"Political bias unclear — model confidence too low ({conf}%). Left: {probs.get('left')}%, Center: {probs.get('center')}%, Right: {probs.get('right')}%.", "type": "warn"},
+        "Far Right":      {"icon": "▶️",  "text": f"Strong right-leaning political tone detected ({conf}% confidence).", "type": "warn"},
+        "Uncertain":      {"icon": "❓",  "text": f"Political bias unclear — model confidence too low ({conf}%). Breakdown: Far-Left: {probs.get('far_left') or 0}%, Slightly-Left: {probs.get('slightly_left') or 0}%, Center: {probs.get('center') or 0}%, Slightly-Right: {probs.get('slightly_right') or 0}%, Far-Right: {probs.get('far_right') or 0}%.", "type": "warn"},
     }
     if bias in bias_msgs:
         findings.append(bias_msgs[bias])

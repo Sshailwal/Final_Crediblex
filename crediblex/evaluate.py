@@ -36,7 +36,7 @@ def batch_tokenize(tokenizer, texts, max_len):
     return tokenizer(texts, padding=True, truncation=True, return_tensors='pt', max_length=max_len)
 
 
-def evaluate(df, model, tokenizer, device, batch_size=8, max_len=512):
+def evaluate(df, model, tokenizer, device, batch_size=8, max_len=config.MAX_LEN):
     model.eval()
     preds = {
         'bias': [],
@@ -128,8 +128,8 @@ if __name__ == '__main__':
     print(f'Evaluating on {len(eval_df)} rows (head of training_data.csv)')
 
     # Load tokenizer + model
-    # Use DebertaV2Tokenizer directly to avoid AutoTokenizer attempting broken Fast conversion
-    tokenizer = DebertaV2Tokenizer.from_pretrained(config.MODEL_NAME)
+    # Use AutoTokenizer to stay consistent with train.py and inference.py
+    tokenizer = AutoTokenizer.from_pretrained(config.MODEL_NAME, use_fast=False)
     model = NewsTrustModel(config.MODEL_NAME).to(device)
 
     model_path = os.path.join(script_dir, config.SAVE_PATH)

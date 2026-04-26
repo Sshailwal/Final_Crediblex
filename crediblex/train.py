@@ -1,3 +1,4 @@
+# emotion_label: int→multihot
 # coding: utf-8
 """
 train.py - CredibleX multi-task trainer (DeBERTa-v3-base)
@@ -14,6 +15,7 @@ from torch.optim import AdamW
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 import pandas as pd
 from tqdm import tqdm
+import json
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -88,21 +90,29 @@ class NewsDataset(Dataset):
         row  = self.df.iloc[idx]
         text = str(row["text"])
 
-        enc = self.tokenizer(
-            text,
-            max_length=config.MAX_LEN,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        )
+        # Bug 11: emotion_label is now a JSON multi-hot string
+        emotion_vec = torch.tensor(json.loads(row["emotion_label"]), dtype=torch.float32)
+        
+        w_ids, w_masks = NewsTrustModel.create_sliding_windows(text, self.tokenizer, config.MAX_LEN)
+
         return {
-            "input_ids":      enc["input_ids"].squeeze(0),
-            "attention_mask": enc["attention_mask"].squeeze(0),
+            "windows_ids":    w_ids,
+            "windows_masks":  w_masks,
             "bias_label":     torch.tensor(int(row["bias_label"]),    dtype=torch.long),
             "fact_score":     torch.tensor(float(row["fact_score"]),  dtype=torch.float),
             "intent_label":   torch.tensor(int(row["intent_label"]),  dtype=torch.long),
-            "emotion_label":  torch.tensor(int(row["emotion_label"]), dtype=torch.long),
+            "emotion_label":  emotion_vec,
         }
+
+def custom_collate_fn(batch):
+    return {
+        "windows_ids": [item["windows_ids"] for item in batch],
+        "windows_masks": [item["windows_masks"] for item in batch],
+        "bias_label": torch.stack([item["bias_label"] for item in batch]),
+        "fact_score": torch.stack([item["fact_score"] for item in batch]),
+        "intent_label": torch.stack([item["intent_label"] for item in batch]),
+        "emotion_label": torch.stack([item["emotion_label"] for item in batch]),
+    }
 
 
 # ── Bias accuracy on random sample ───────────────────────────────────────────
@@ -115,18 +125,24 @@ def _quick_bias_acc(model, df, tokenizer, n=512):
         for i in range(0, len(sample), config.BATCH_SIZE):
             batch  = sample.iloc[i : i + config.BATCH_SIZE]
             texts  = batch["text"].astype(str).tolist()
-            enc    = tokenizer(texts, max_length=config.MAX_LEN,
-                               padding="longest", truncation=True,
-                               return_tensors="pt")
-            ids    = enc["input_ids"].to(config.DEVICE)
-            mask   = enc["attention_mask"].to(config.DEVICE)
-            try:
-                out    = model(ids, mask)
-                preds  = torch.argmax(out["bias"], dim=1).cpu().tolist()
-                labels = batch["bias_label"].astype(int).tolist()
-                correct += sum(p == l for p, l in zip(preds, labels))
-            except RuntimeError:
-                pass
+            labels = batch["bias_label"].astype(int).tolist()
+            
+            for text, label in zip(texts, labels):
+                w_ids, w_masks = NewsTrustModel.create_sliding_windows(text, tokenizer, config.MAX_LEN)
+                
+                pooled_embs = []
+                for wid, wmask in zip(w_ids, w_masks):
+                    wid = wid.unsqueeze(0).to(config.DEVICE)
+                    wmask = wmask.unsqueeze(0).to(config.DEVICE)
+                    out = model.backbone(input_ids=wid, attention_mask=wmask)
+                    pooled = model._mean_pool(out.last_hidden_state, wmask)
+                    pooled_embs.append(pooled)
+                    
+                avg_pooled = torch.stack(pooled_embs).mean(dim=0)
+                pred_bias = model.bias_head(avg_pooled)
+                pred_idx = torch.argmax(pred_bias, dim=1).item()
+                if pred_idx == label:
+                    correct += 1
     model.train()
     return correct / len(sample)
 
@@ -184,7 +200,7 @@ def train():
 
     # ── 3. Tokenizer & model ──────────────────────────────────────────────────
     print("\nLoading tokenizer: {}".format(config.MODEL_NAME))
-    TOKENIZER = AutoTokenizer.from_pretrained(config.MODEL_NAME)
+    TOKENIZER = AutoTokenizer.from_pretrained(config.MODEL_NAME, use_fast=False)
 
     dataset    = NewsDataset(df, TOKENIZER)
     dataloader = DataLoader(
@@ -194,19 +210,11 @@ def train():
         num_workers=0,        # Windows: must be 0 outside __main__ guard
         pin_memory=(device.type == "cuda"),
         drop_last=True,
+        collate_fn=custom_collate_fn,
     )
 
     print("Loading model: {}".format(config.MODEL_NAME))
     model = NewsTrustModel(config.MODEL_NAME).to(device)
-
-    # torch.compile speedup (PyTorch >= 2.0)
-    # Disabled on Windows because Triton is not natively supported and crashes during forward pass
-    # if hasattr(torch, "compile") and os.name != "nt":
-    #     try:
-    #         model = torch.compile(model)
-    #         print("torch.compile() applied (~15% speedup)")
-    #     except Exception as e:
-    #         print("torch.compile skipped: {}".format(e))
 
     # ── 4. Loss functions with class weights ──────────────────────────────────
     bias_w    = compute_class_weights(df["bias_label"],    config.N_BIAS_CLASSES, device)
@@ -220,7 +228,8 @@ def train():
 
     loss_bias    = nn.CrossEntropyLoss(weight=bias_w,    label_smoothing=0.1)
     loss_intent  = nn.CrossEntropyLoss(weight=intent_w)
-    loss_emotion = nn.CrossEntropyLoss(weight=emotion_w)
+    # Bug 11: Multi-label emotion uses BCEWithLogitsLoss
+    loss_emotion = nn.BCEWithLogitsLoss()
     loss_fact    = nn.MSELoss()
 
     # ── 5. Optimizer + scheduler ──────────────────────────────────────────────
@@ -240,8 +249,8 @@ def train():
     print("\nTraining plan:")
     print("  {} epochs | {} batches/epoch | {} opt-steps | {} warmup".format(
         config.EPOCHS, n_batches, total_opt_steps, warmup_steps))
-    print("  Loss weights: bias x{} | emotion x{} | fact/intent x1.0".format(
-        config.BIAS_LOSS_WEIGHT, config.EMOTION_LOSS_WEIGHT))
+    print("  Loss weights: bias x{} | fact x{} | emotion x{} | intent x1.0".format(
+        config.BIAS_LOSS_WEIGHT, config.FACT_LOSS_WEIGHT, config.EMOTION_LOSS_WEIGHT))
 
     # ── 6. Auto-resume ────────────────────────────────────────────────────────
     best_bias_acc = 0.0
@@ -252,12 +261,10 @@ def train():
         print("\nResuming from epoch {} checkpoint: {}".format(
             start_epoch, ckpt_path))
         ckpt = torch.load(ckpt_path, map_location=device)
-        # Handle torch.compile wrapping
         state = ckpt["model_state_dict"]
         try:
             model.load_state_dict(state)
         except RuntimeError:
-            # Strip _orig_mod prefix if compiled
             new_state = {k.replace("_orig_mod.", ""): v for k, v in state.items()}
             model.load_state_dict(new_state, strict=False)
         if "optimizer_state_dict" in ckpt:
@@ -291,33 +298,71 @@ def train():
             last_batch = (batch_idx == n_batches - 1)
 
             # Move to device
-            ids    = batch["input_ids"].to(device, non_blocking=True)
-            mask   = batch["attention_mask"].to(device, non_blocking=True)
             b_lbl  = batch["bias_label"].to(device, non_blocking=True)
             f_lbl  = batch["fact_score"].to(device, non_blocking=True)
             i_lbl  = batch["intent_label"].to(device, non_blocking=True)
+            # Bug 11: emotion labels are float vectors for BCE
             e_lbl  = batch["emotion_label"].to(device, non_blocking=True)
 
-            # Forward + loss
             try:
+                batch_bias_preds = []
+                batch_fact_preds = []
+                batch_intent_preds = []
+                batch_emotion_preds = []
+
+                for i in range(len(batch["windows_ids"])):
+                    w_ids_list = batch["windows_ids"][i]
+                    w_masks_list = batch["windows_masks"][i]
+                    
+                    pooled_embs = []
+                    for w_ids, w_mask in zip(w_ids_list, w_masks_list):
+                        w_ids = w_ids.unsqueeze(0).to(device, non_blocking=True)
+                        w_mask = w_mask.unsqueeze(0).to(device, non_blocking=True)
+                        
+                        if scaler:
+                            with torch.cuda.amp.autocast():
+                                out = model.backbone(input_ids=w_ids, attention_mask=w_mask)
+                                pooled = model._mean_pool(out.last_hidden_state, w_mask)
+                        else:
+                            out = model.backbone(input_ids=w_ids, attention_mask=w_mask)
+                            pooled = model._mean_pool(out.last_hidden_state, w_mask)
+                        
+                        pooled_embs.append(pooled)
+                    
+                    avg_pooled = torch.stack(pooled_embs).mean(dim=0)
+                    avg_pooled = model.dropout(avg_pooled)
+                    
+                    if scaler:
+                        with torch.cuda.amp.autocast():
+                            batch_bias_preds.append(model.bias_head(avg_pooled))
+                            batch_fact_preds.append(torch.sigmoid(model.fact_head(avg_pooled)))
+                            batch_intent_preds.append(model.intent_head(avg_pooled))
+                            batch_emotion_preds.append(model.emotion_head(avg_pooled))
+                    else:
+                        batch_bias_preds.append(model.bias_head(avg_pooled))
+                        batch_fact_preds.append(torch.sigmoid(model.fact_head(avg_pooled)))
+                        batch_intent_preds.append(model.intent_head(avg_pooled))
+                        batch_emotion_preds.append(model.emotion_head(avg_pooled))
+                        
+                out_bias = torch.cat(batch_bias_preds, dim=0)
+                out_fact = torch.cat(batch_fact_preds, dim=0).squeeze(-1)
+                out_intent = torch.cat(batch_intent_preds, dim=0)
+                out_emotion = torch.cat(batch_emotion_preds, dim=0)
+                
                 if scaler:
                     with torch.cuda.amp.autocast():
-                        out  = model(ids, mask)
-                        lb   = loss_bias(out["bias"], b_lbl)
-                        lf   = loss_fact(out["factuality"].squeeze(-1), f_lbl)
-                        li   = loss_intent(out["intent"], i_lbl)
-                        le   = loss_emotion(out["emotion"], e_lbl)
-                        loss = (config.BIAS_LOSS_WEIGHT * lb + lf + li +
-                                config.EMOTION_LOSS_WEIGHT * le) / config.GRAD_ACCUM_STEPS
+                        lb = loss_bias(out_bias, b_lbl)
+                        lf = loss_fact(out_fact, f_lbl)
+                        li = loss_intent(out_intent, i_lbl)
+                        le = loss_emotion(out_emotion, e_lbl)
+                        loss = (config.BIAS_LOSS_WEIGHT * lb + config.FACT_LOSS_WEIGHT * lf + li + config.EMOTION_LOSS_WEIGHT * le) / config.GRAD_ACCUM_STEPS
                     scaler.scale(loss).backward()
                 else:
-                    out  = model(ids, mask)
-                    lb   = loss_bias(out["bias"], b_lbl)
-                    lf   = loss_fact(out["factuality"].squeeze(-1), f_lbl)
-                    li   = loss_intent(out["intent"], i_lbl)
-                    le   = loss_emotion(out["emotion"], e_lbl)
-                    loss = (config.BIAS_LOSS_WEIGHT * lb + lf + li +
-                            config.EMOTION_LOSS_WEIGHT * le) / config.GRAD_ACCUM_STEPS
+                    lb = loss_bias(out_bias, b_lbl)
+                    lf = loss_fact(out_fact, f_lbl)
+                    li = loss_intent(out_intent, i_lbl)
+                    le = loss_emotion(out_emotion, e_lbl)
+                    loss = (config.BIAS_LOSS_WEIGHT * lb + config.FACT_LOSS_WEIGHT * lf + li + config.EMOTION_LOSS_WEIGHT * le) / config.GRAD_ACCUM_STEPS
                     loss.backward()
 
             except RuntimeError as e:

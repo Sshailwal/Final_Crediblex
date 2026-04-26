@@ -12,7 +12,7 @@ class NewsTrustModel(nn.Module):
       bias_head      → N_BIAS_CLASSES-class (Far-Left / Slightly Left / Center / Slightly Right / Far-Right)
       fact_head      → regression scalar in [0, 1]  (factuality)
       intent_head    → 3-class (News / Opinion / Satire)
-      emotion_head   → 28-class (GoEmotions)
+      emotion_head   → 28-class (GoEmotions, designed for BCEWithLogitsLoss multi-label)
 
     Architecture notes
     ------------------
@@ -81,3 +81,46 @@ class NewsTrustModel(nn.Module):
             "intent":     self.intent_head(pooled),
             "emotion":    self.emotion_head(pooled),
         }
+
+    @staticmethod
+    def create_sliding_windows(text: str, tokenizer, max_len: int):
+        enc = tokenizer(text, truncation=False, return_tensors="pt")
+        input_ids = enc["input_ids"].squeeze(0)
+        attention_mask = enc["attention_mask"].squeeze(0)
+        
+        seq_len = input_ids.size(0)
+        windows_ids = []
+        windows_masks = []
+        
+        if seq_len <= max_len:
+            pad_len = max_len - seq_len
+            w_ids = torch.cat([input_ids, torch.zeros(pad_len, dtype=input_ids.dtype, device=input_ids.device)])
+            w_mask = torch.cat([attention_mask, torch.zeros(pad_len, dtype=attention_mask.dtype, device=attention_mask.device)])
+            windows_ids.append(w_ids)
+            windows_masks.append(w_mask)
+            return windows_ids, windows_masks
+            
+        stride = max_len // 2
+        cls_token = input_ids[0:1]
+        sep_token = input_ids[-1:]
+        
+        inner_ids = input_ids[1:-1]
+        inner_mask = attention_mask[1:-1]
+        inner_max_len = max_len - 2
+        
+        for i in range(0, len(inner_ids), stride):
+            chunk_ids = inner_ids[i : i + inner_max_len]
+            chunk_mask = inner_mask[i : i + inner_max_len]
+            
+            w_ids = torch.cat([cls_token, chunk_ids, sep_token])
+            w_mask = torch.cat([attention_mask[0:1], chunk_mask, attention_mask[-1:]])
+            
+            if w_ids.size(0) < max_len:
+                pad_len = max_len - w_ids.size(0)
+                w_ids = torch.cat([w_ids, torch.zeros(pad_len, dtype=w_ids.dtype, device=w_ids.device)])
+                w_mask = torch.cat([w_mask, torch.zeros(pad_len, dtype=w_mask.dtype, device=w_mask.device)])
+                
+            windows_ids.append(w_ids)
+            windows_masks.append(w_mask)
+            
+        return windows_ids, windows_masks

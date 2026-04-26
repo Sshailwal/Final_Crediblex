@@ -1,9 +1,22 @@
+# emotion_label: int→multihot
 import pandas as pd
 from datasets import load_dataset
 from schema import ArticleRecord
 from tqdm import tqdm
 import os
 import sys
+import config
+import json
+
+def to_multihot(labels, n=28):
+    """Convert single label or list of labels to JSON multi-hot string."""
+    if isinstance(labels, (int, float)):
+        labels = [int(labels)]
+    vec = [0.0] * n
+    for l in labels:
+        if 0 <= l < n:
+            vec[l] = 1.0
+    return json.dumps(vec)
 
 os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
 # Force UTF-8 output on Windows so print statements don't crash on emoji
@@ -25,14 +38,16 @@ EMOTION_FACT_SCORE = {
 
 
 def upsample_minority_bias(df: pd.DataFrame) -> pd.DataFrame:
-    """Upsample Left(0) and Right(2) rows to reduce class imbalance."""
-    left_df   = df[df['bias_label'] == 0].copy()
-    center_df = df[df['bias_label'] == 1].copy()
-    right_df  = df[df['bias_label'] == 2].copy()
+    """Upsample minority bias rows to reduce class imbalance."""
+    class_dfs = {}
+    for c in range(config.N_BIAS_CLASSES):
+        class_dfs[c] = df[df['bias_label'] == c].copy()
 
-    print(f"\n[BIAS] Before upsample -> Left: {len(left_df):,}  Center: {len(center_df):,}  Right: {len(right_df):,}")
+    before_str = "  ".join(f"Class {c}: {len(class_dfs[c]):,}" for c in range(config.N_BIAS_CLASSES))
+    print(f"\n[BIAS] Before upsample -> {before_str}")
 
-    target = min(len(center_df) // 2, 8_000)
+    max_class_count = max(len(cdf) for cdf in class_dfs.values())
+    target = min(max_class_count // 2, 8_000)
 
     def _up(sub, t):
         if len(sub) == 0 or len(sub) >= t:
@@ -40,14 +55,16 @@ def upsample_minority_bias(df: pd.DataFrame) -> pd.DataFrame:
         r = (t // len(sub)) + 1
         return pd.concat([sub] * r, ignore_index=True).head(t)
 
-    left_df  = _up(left_df,  target)
-    right_df = _up(right_df, target)
+    balanced_dfs = []
+    for c in range(config.N_BIAS_CLASSES):
+        balanced_dfs.append(_up(class_dfs[c], target))
 
-    balanced = pd.concat([left_df, center_df, right_df], ignore_index=True)
+    balanced = pd.concat(balanced_dfs, ignore_index=True)
     balanced = balanced.sample(frac=1, random_state=42).reset_index(drop=True)
 
     lc = balanced['bias_label'].value_counts().to_dict()
-    print(f"[BIAS] After  upsample -> Left: {lc.get(0,0):,}  Center: {lc.get(1,0):,}  Right: {lc.get(2,0):,}")
+    after_str = "  ".join(f"Class {c}: {lc.get(c, 0):,}" for c in range(config.N_BIAS_CLASSES))
+    print(f"[BIAS] After  upsample -> {after_str}")
     print(f"Total rows: {len(balanced):,}\n")
     return balanced
 
@@ -56,6 +73,9 @@ def get_explainable_dataset() -> pd.DataFrame:
     print("=" * 70)
     print("  Downloading & assembling CredibleX training dataset")
     print("=" * 70)
+
+    # Bug 11: Migration Note — emotion_label is now a JSON multi-hot string.
+    # Existing training_data.csv MUST be regenerated to avoid shape mismatch.
 
     unified_data = []
     liar_loaded  = False
@@ -71,7 +91,7 @@ def get_explainable_dataset() -> pd.DataFrame:
                 unified_data.append(ArticleRecord(
                     text=str(row['text']), bias_label=1,
                     fact_score=liar_map.get(int(row['labels']), 0.5),
-                    intent_label=0, emotion_label=27,
+                    intent_label=0, emotion_label=to_multihot(27),
                 ).model_dump())
             except Exception:
                 continue
@@ -93,7 +113,7 @@ def get_explainable_dataset() -> pd.DataFrame:
                 bias_lbl = raw_lbl if raw_lbl in (0, 1, 2) else 1
                 unified_data.append(ArticleRecord(
                     text=str(row['text']), bias_label=bias_lbl,
-                    fact_score=0.5, intent_label=0, emotion_label=27,
+                    fact_score=0.5, intent_label=0, emotion_label=to_multihot(27),
                 ).model_dump())
                 count += 1
             except Exception:
@@ -117,7 +137,7 @@ def get_explainable_dataset() -> pd.DataFrame:
                     bias_label=2 if is_hyper else 1,
                     fact_score=0.3 if is_hyper else 0.7,
                     intent_label=1 if is_hyper else 0,
-                    emotion_label=27,
+                    emotion_label=to_multihot(27),
                 ).model_dump())
                 count += 1
             except Exception:
@@ -140,7 +160,7 @@ def get_explainable_dataset() -> pd.DataFrame:
                     text=str(row['text']), bias_label=1,
                     fact_score=0.1 if is_fake else 0.8,
                     intent_label=2 if is_fake else 0,
-                    emotion_label=27,
+                    emotion_label=to_multihot(27),
                 ).model_dump())
                 count += 1
             except Exception:
@@ -168,7 +188,7 @@ def get_explainable_dataset() -> pd.DataFrame:
                 unified_data.append(ArticleRecord(
                     text=text, bias_label=1,
                     fact_score=EMOTION_FACT_SCORE.get(int(emo), 0.5),
-                    intent_label=1, emotion_label=int(emo),
+                    intent_label=0, emotion_label=to_multihot(labels),
                 ).model_dump())
                 count += 1
             except Exception:
@@ -202,9 +222,8 @@ if __name__ == "__main__":
         print(f"[SAVED] training_data.csv  ({len(df):,} rows)")
         print("\nFinal bias distribution:")
         vc = df['bias_label'].value_counts()
-        print(f"  Left(0)  : {vc.get(0, 0):,}")
-        print(f"  Center(1): {vc.get(1, 0):,}")
-        print(f"  Right(2) : {vc.get(2, 0):,}")
+        for c in range(config.N_BIAS_CLASSES):
+            print(f"  Class {c}: {vc.get(c, 0):,}")
         print("\nFinal intent distribution:")
         vi = df['intent_label'].value_counts()
         print(f"  News(0)   : {vi.get(0, 0):,}")
