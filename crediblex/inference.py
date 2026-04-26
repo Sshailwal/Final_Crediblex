@@ -57,8 +57,10 @@ EMOTION_MAP = {
 }
 
 # ── Bias confidence threshold ──────────────────────────────────────────────────
-# 5-class model: random baseline = 20%, so 30% is a meaningful signal
-BIAS_CONFIDENCE_THRESHOLD = 0.30
+# 5-class model: random baseline = 20%. Raised to 40% so weak signals on
+# undertrained Far-Left/Far-Right classes output "Uncertain" instead of a
+# false commitment. Revisit after retraining with corrected label data.
+BIAS_CONFIDENCE_THRESHOLD = 0.40
 
 # ── Indian political context keywords ───────────────────────────────────────────────
 INDIA_KEYWORDS = [

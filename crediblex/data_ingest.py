@@ -89,7 +89,7 @@ def get_explainable_dataset() -> pd.DataFrame:
         for row in tqdm(liar['train'], desc="  LIAR"):
             try:
                 unified_data.append(ArticleRecord(
-                    text=str(row['text']), bias_label=1,
+                    text=str(row['text']), bias_label=2,
                     fact_score=liar_map.get(int(row['labels']), 0.5),
                     intent_label=0, emotion_label=to_multihot(27),
                 ).model_dump())
@@ -110,7 +110,8 @@ def get_explainable_dataset() -> pd.DataFrame:
                 break
             try:
                 raw_lbl  = int(row['label'])
-                bias_lbl = raw_lbl if raw_lbl in (0, 1, 2) else 1
+                mbib_remap = {0: 1, 1: 2, 2: 3}
+                bias_lbl = mbib_remap.get(raw_lbl, 2)
                 unified_data.append(ArticleRecord(
                     text=str(row['text']), bias_label=bias_lbl,
                     fact_score=0.5, intent_label=0, emotion_label=to_multihot(27),
@@ -134,7 +135,7 @@ def get_explainable_dataset() -> pd.DataFrame:
                 is_hyper = str(row.get('label', '')).lower() == 'true'
                 unified_data.append(ArticleRecord(
                     text=str(row['text']),
-                    bias_label=2 if is_hyper else 1,
+                    bias_label=4 if is_hyper else 2,
                     fact_score=0.3 if is_hyper else 0.7,
                     intent_label=1 if is_hyper else 0,
                     emotion_label=to_multihot(27),
@@ -157,7 +158,7 @@ def get_explainable_dataset() -> pd.DataFrame:
             try:
                 is_fake = int(row['label']) == 0
                 unified_data.append(ArticleRecord(
-                    text=str(row['text']), bias_label=1,
+                    text=str(row['text']), bias_label=2,
                     fact_score=0.1 if is_fake else 0.8,
                     intent_label=2 if is_fake else 0,
                     emotion_label=to_multihot(27),
@@ -186,7 +187,7 @@ def get_explainable_dataset() -> pd.DataFrame:
                 labels = row.get('labels', [])
                 emo    = labels[0] if isinstance(labels, list) and labels else 27
                 unified_data.append(ArticleRecord(
-                    text=text, bias_label=1,
+                    text=text, bias_label=2,
                     fact_score=EMOTION_FACT_SCORE.get(int(emo), 0.5),
                     intent_label=0, emotion_label=to_multihot(labels),
                 ).model_dump())

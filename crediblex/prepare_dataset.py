@@ -174,11 +174,12 @@ def load_hyperpartisan(limit=5000):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Source 2: mediabiasgroup/BABE  — 3-class gold labels (US/EU)
-# Labels: 0=Left/1=Center/2=Right  ->  remap to 1/2/3
+# Labels: "left"/0=Far-Left, "left-center"/1=Slightly-Left, "center"/2=Center,
+#         "right-center"/3=Slightly-Right, "right"/4=Far-Right
 # ─────────────────────────────────────────────────────────────────────────────
-BABE_REMAP_STR = {"left": 1, "left-center": 1, "center": 2,
-                  "right-center": 3, "right": 3}
-BABE_REMAP_INT = {0: 1, 1: 2, 2: 3}
+BABE_REMAP_STR = {"left": 0, "left-center": 1, "center": 2,
+                  "right-center": 3, "right": 4}
+BABE_REMAP_INT = {0: 0, 1: 2, 2: 4}
 
 def load_babe(limit=4000):
     rows = []
@@ -191,12 +192,13 @@ def load_babe(limit=4000):
             text = str(r.get("text", "")).strip()
             if len(text) < 20:
                 continue
-            raw  = r.get("label", None)
-            bias = None
-            try:
-                bias = BABE_REMAP_INT.get(int(raw))
-            except (TypeError, ValueError):
-                bias = BABE_REMAP_STR.get(str(raw).lower().strip())
+            
+            # The 'type' field contains 'left', 'center', 'right'
+            raw_type = r.get("type")
+            if not raw_type:
+                continue
+                
+            bias = BABE_REMAP_STR.get(str(raw_type).lower().strip())
             if bias is None:
                 continue
             rows.append(_row(text, bias, 0.5, 0, 27, "US"))
