@@ -196,7 +196,7 @@ def train():
     print("  bias  distribution: {}".format(
         df["bias_label"].value_counts().sort_index().to_dict()))
     print("  emotion neutral %: {:.1f}".format(
-        (df["emotion_label"] == 27).mean() * 100))
+        df["emotion_label"].apply(lambda s: json.loads(s)[27] == 1.0).mean() * 100))
 
     # ── 3. Tokenizer & model ──────────────────────────────────────────────────
     print("\nLoading tokenizer: {}".format(config.MODEL_NAME))
@@ -219,12 +219,9 @@ def train():
     # ── 4. Loss functions with class weights ──────────────────────────────────
     bias_w    = compute_class_weights(df["bias_label"],    config.N_BIAS_CLASSES, device)
     intent_w  = compute_class_weights(df["intent_label"],  3,                     device)
-    emotion_w = compute_class_weights(df["emotion_label"], 28,                    device)
 
     print("\nClass weights:")
     print("  bias   : {}".format([round(w, 3) for w in bias_w.tolist()]))
-    top5 = sorted(enumerate(emotion_w.tolist()), key=lambda x: x[1], reverse=True)[:5]
-    print("  emotion (top-5): {}".format([(i, round(w, 2)) for i, w in top5]))
 
     loss_bias    = nn.CrossEntropyLoss(weight=bias_w,    label_smoothing=0.1)
     loss_intent  = nn.CrossEntropyLoss(weight=intent_w)
