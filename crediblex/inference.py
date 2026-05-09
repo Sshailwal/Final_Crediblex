@@ -38,27 +38,14 @@ _model     = None
 _model_lock = threading.Lock()
 
 # ── Label mappings ─────────────────────────────────────────────────────────────
-BIAS_MAP = {
-    0: "Far Left",
-    1: "Slightly Left",
-    2: "Center",
-    3: "Slightly Right",
-    4: "Far Right",
-}
-INTENT_MAP = {0: "News", 1: "Opinion", 2: "Satire"}
-EMOTION_MAP = {
-    0: "admiration", 1: "amusement",   2: "anger",       3: "annoyance",
-    4: "approval",   5: "caring",      6: "confusion",   7: "curiosity",
-    8: "desire",     9: "disappointment", 10: "disapproval", 11: "disgust",
-    12: "embarrassment", 13: "excitement", 14: "fear",    15: "gratitude",
-    16: "grief",     17: "joy",        18: "love",        19: "nervousness",
-    20: "optimism",  21: "pride",      22: "realization", 23: "relief",
-    24: "remorse",   25: "sadness",    26: "surprise",    27: "neutral",
-}
+BIAS_MAP = {0: "Left", 1: "Center", 2: "Right"}
+INTENT_MAP = {0: "News", 1: "Satire"}
+EMOTION_MAP = {0: "Joy", 1: "Sadness", 2: "Anger", 3: "Fear", 4: "Surprise", 5: "Disgust", 6: "Neutral"}
 
 # ── Bias confidence threshold ──────────────────────────────────────────────────
-# 5-class model: random baseline = 20%, so 30% is a meaningful signal
-BIAS_CONFIDENCE_THRESHOLD = 0.30
+# 3-class model: random baseline = 33%, so 45% is a meaningful signal
+BIAS_CONFIDENCE_THRESHOLD = 0.45
+
 
 # ── Indian political context keywords ───────────────────────────────────────────────
 INDIA_KEYWORDS = [
@@ -83,9 +70,14 @@ def load_model():
         temp_model     = NewsTrustModel(config.MODEL_NAME, dropout=0.0)  # dropout=0 at inference
 
         try:
-            temp_model.load_state_dict(
-                torch.load(config.SAVE_PATH, map_location=config.DEVICE)
-            )
+            load_device = "cpu" if not torch.cuda.is_available() else config.DEVICE
+            ckpt = torch.load(config.SAVE_PATH, map_location=load_device)
+            # V1 checkpoint wraps state_dict inside "model_state_dict" key
+            if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+                state_dict = ckpt["model_state_dict"]
+            else:
+                state_dict = ckpt
+            temp_model.load_state_dict(state_dict)
             print(f"✅ Loaded trained weights from {config.SAVE_PATH}")
         except Exception as e:
             print(f"⚠️  Could not load {config.SAVE_PATH}. Using untrained model. ({e})")
@@ -101,16 +93,11 @@ def load_model():
 
 def _decode_bias(bias_logits: torch.Tensor) -> dict:
     """
-    Decode 5-class bias logits into a human label + confidence.
-
-    5-class mapping:
-      0 = Far Left | 1 = Slightly Left | 2 = Center |
-      3 = Slightly Right | 4 = Far Right
-
-    Position for BiasSlider: 0 (Far Left) → 50 (Center) → 100 (Far Right)
+    Decode 3-class bias logits into a human label + confidence.
+    0 = Left | 1 = Center | 2 = Right
     """
     probs = torch.softmax(bias_logits, dim=0)
-    p = [probs[i].item() for i in range(5)]
+    p = [probs[i].item() for i in range(3)]
 
     winning_idx  = int(torch.argmax(probs).item())
     winning_prob = p[winning_idx]
@@ -119,21 +106,20 @@ def _decode_bias(bias_logits: torch.Tensor) -> dict:
     if winning_prob < BIAS_CONFIDENCE_THRESHOLD:
         label = "Uncertain"
 
-    # Weighted position: Far-Left=0, Slightly-Left=25, Center=50, Slightly-Right=75, Far-Right=100
-    position = round(p[0]*0 + p[1]*25 + p[2]*50 + p[3]*75 + p[4]*100, 1)
+    # Position for BiasSlider: 0 (Left) → 50 (Center) → 100 (Right)
+    position = round(p[0]*0 + p[1]*50 + p[2]*100, 1)
 
     return {
         "label":      label,
         "confidence": round(winning_prob * 100, 1),
         "probs": {
-            "far_left":      round(p[0] * 100, 1),
-            "slightly_left": round(p[1] * 100, 1),
-            "center":        round(p[2] * 100, 1),
-            "slightly_right":round(p[3] * 100, 1),
-            "far_right":     round(p[4] * 100, 1),
+            "left":   round(p[0] * 100, 1),
+            "center": round(p[1] * 100, 1),
+            "right":  round(p[2] * 100, 1),
         },
         "position": position,
     }
+
 
 
 def _run_model(text: str) -> dict:
@@ -182,7 +168,7 @@ def _run_model(text: str) -> dict:
     
     # Bug 11: Multi-label emotion decoding (sigmoid + threshold)
     emo_probs = torch.sigmoid(emotion_logits[0])
-    top_indices = torch.where(emo_probs > 0.5)[0]
+    top_indices = torch.where(emo_probs > 0.3)[0]  # Threshold 0.3 per V1 Model Card
     
     # Primary = highest sigmoid score
     primary_idx = torch.argmax(emo_probs).item()
@@ -297,27 +283,19 @@ def analyze_text(text: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 EMOTION_CREDIBILITY = {
-    "admiration": 0.80, "amusement": 0.70, "anger":     0.20,
-    "annoyance":  0.30, "approval":  0.85, "caring":    0.75,
-    "confusion":  0.50, "curiosity": 0.65, "desire":    0.60,
-    "disappointment": 0.30, "disapproval": 0.20, "disgust": 0.10,
-    "embarrassment":  0.35, "excitement":  0.70, "fear":   0.20,
-    "gratitude":  0.90, "grief":     0.25, "joy":       0.80,
-    "love":       0.80, "nervousness": 0.30, "optimism": 0.70,
-    "pride":      0.70, "realization": 0.60, "relief":   0.75,
-    "remorse":    0.30, "sadness":   0.30, "surprise":   0.55,
-    "neutral":    0.65,
+    "Joy":      0.80, "Sadness":  0.30, "Anger":    0.20,
+    "Fear":     0.20, "Surprise": 0.55, "Disgust":  0.10,
+    "Neutral":  0.65,
 }
 
-INTENT_CREDIBILITY = {"News": 1.0, "Opinion": 0.5, "Satire": 0.0}
+INTENT_CREDIBILITY = {"News": 1.0, "Satire": 0.0}
 BIAS_CREDIBILITY   = {
-    "Far Left":       0.0,
-    "Slightly Left":  0.5,
-    "Center":         1.0,
-    "Slightly Right": 0.5,
-    "Far Right":      0.0,
-    "Uncertain":      0.4,   # small penalty for uncertain bias
+    "Left":      0.5,
+    "Center":    1.0,
+    "Right":     0.5,
+    "Uncertain": 0.4,
 }
+
 
 
 def compute_trust_score(factuality: float, bias: str,
@@ -359,12 +337,10 @@ def _bullet_findings(factuality: float, bias_obj: dict, intent: str,
 
     # Bias — with confidence info
     bias_msgs = {
-        "Far Left":       {"icon": "◀️",  "text": f"Strong left-leaning political tone detected ({conf}% confidence).", "type": "warn"},
-        "Slightly Left":  {"icon": "◁",   "text": f"Slight left-leaning perspective detected ({conf}% confidence).", "type": "info"},
-        "Center":         {"icon": "⚖️",  "text": f"Politically balanced / centre-leaning perspective ({conf}% confidence).", "type": "good"},
-        "Slightly Right": {"icon": "▷",   "text": f"Slight right-leaning perspective detected ({conf}% confidence).", "type": "info"},
-        "Far Right":      {"icon": "▶️",  "text": f"Strong right-leaning political tone detected ({conf}% confidence).", "type": "warn"},
-        "Uncertain":      {"icon": "❓",  "text": f"Political bias unclear — model confidence too low ({conf}%). Breakdown: Far-Left: {probs.get('far_left') or 0}%, Slightly-Left: {probs.get('slightly_left') or 0}%, Center: {probs.get('center') or 0}%, Slightly-Right: {probs.get('slightly_right') or 0}%, Far-Right: {probs.get('far_right') or 0}%.", "type": "warn"},
+        "Left":      {"icon": "◀️",  "text": f"Left-leaning political tone detected ({conf}% confidence).", "type": "warn"},
+        "Center":    {"icon": "⚖️",  "text": f"Politically balanced / centre-leaning perspective ({conf}% confidence).", "type": "good"},
+        "Right":     {"icon": "▶️",  "text": f"Right-leaning political tone detected ({conf}% confidence).", "type": "warn"},
+        "Uncertain": {"icon": "❓",  "text": f"Political bias unclear — model confidence too low ({conf}%). Breakdown: Left: {probs.get('left') or 0}%, Center: {probs.get('center') or 0}%, Right: {probs.get('right') or 0}%.", "type": "warn"},
     }
     if bias in bias_msgs:
         findings.append(bias_msgs[bias])
@@ -372,7 +348,6 @@ def _bullet_findings(factuality: float, bias_obj: dict, intent: str,
     # Intent
     intent_msgs = {
         "News":    {"icon": "📰", "text": "Classified as straight news reporting — intended as factual journalism.", "type": "good"},
-        "Opinion": {"icon": "💬", "text": "Opinion / editorial content — represents a personal or editorial viewpoint, not hard fact.", "type": "warn"},
         "Satire":  {"icon": "🎭", "text": "Satire detected — this content is NOT intended to be taken as factual reporting.", "type": "bad"},
     }
     if intent in intent_msgs:

@@ -3,26 +3,10 @@ import torch.nn as nn
 from transformers import AutoModel
 import config
 
-
 class NewsTrustModel(nn.Module):
     """
     Multi-task DeBERTa-v3-base model for news credibility scoring.
-
-    Four output heads trained jointly:
-      bias_head      → N_BIAS_CLASSES-class (Far-Left / Slightly Left / Center / Slightly Right / Far-Right)
-      fact_head      → regression scalar in [0, 1]  (factuality)
-      intent_head    → 3-class (News / Opinion / Satire)
-      emotion_head   → 28-class (GoEmotions, designed for BCEWithLogitsLoss multi-label)
-
-    Architecture notes
-    ------------------
-    • Mean pooling over the full token sequence, masked to real tokens.
-      This is measurably better than [CLS] pooling for DeBERTa-v3 because
-      DeBERTa trains [CLS] with disentangled attention, not as a pooling token.
-    • Shared dropout(0.1) applied to the pooled embedding before every head
-      to regularise all tasks equally and prevent overfitting.
-    • Bias head is 5-class (config.N_BIAS_CLASSES) for finer-grained
-      Left ↔ Center ↔ Right detection.
+    Optimized for Safe Mode (6GB VRAM).
     """
 
     def __init__(self, model_name: str, dropout: float = 0.1):
@@ -30,97 +14,113 @@ class NewsTrustModel(nn.Module):
         self.backbone    = AutoModel.from_pretrained(model_name)
         hidden           = self.backbone.config.hidden_size
 
-        # Shared regularisation — applied AFTER mean pooling, BEFORE every head
+        # Shared regularisation
         self.dropout = nn.Dropout(dropout)
 
-        # ── Classification / regression heads ──────────────────────────────
-        # bias_head uses config.N_BIAS_CLASSES (= 5):
-        #   0 = Far Left | 1 = Slightly Left | 2 = Center | 3 = Slightly Right | 4 = Far Right
+        # Classification / regression heads
         self.bias_head    = nn.Linear(hidden, config.N_BIAS_CLASSES)
-        self.fact_head    = nn.Linear(hidden, 1)   # factuality regression
-        self.intent_head  = nn.Linear(hidden, 3)   # News / Opinion / Satire
-        self.emotion_head = nn.Linear(hidden, 28)  # GoEmotions 28-class
+        self.fact_head    = nn.Linear(hidden, 1)
+        self.intent_head  = nn.Linear(hidden, 2)
+        self.emotion_head = nn.Linear(hidden, 7)   # 7 Ekman classes (mapped from GoEmotions 28)
 
-    # ───────── Attention-masked mean pooling ───────────────────────────────
+    def configure_for_training(self):
+        """
+        Apply memory optimizations: gradient checkpointing and layer freezing.
+        """
+        # 1. Enable gradient checkpointing
+        if config.GRADIENT_CHECKPOINTING:
+            self.backbone.gradient_checkpointing_enable()
+            print("[INFO] Gradient checkpointing ENABLED")
+
+        # 2. Freeze bottom layers
+        # Freeze embeddings
+        for param in self.backbone.embeddings.parameters():
+            param.requires_grad = False
+        
+        # Freeze encoder layers
+        for i, layer in enumerate(self.backbone.encoder.layer):
+            if i < config.FREEZE_LAYERS:
+                for param in layer.parameters():
+                    param.requires_grad = False
+        
+        print("[INFO] Froze embeddings and bottom {} layers".format(config.FREEZE_LAYERS))
+
+        # 3. Print parameter summary
+        total_params     = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print("Trainable: {:,} / {:,} params ({:.1f}%)".format(
+            trainable_params, total_params, trainable_params/total_params*100))
+
     @staticmethod
     def _mean_pool(token_embeddings: torch.Tensor,
                    attention_mask:   torch.Tensor) -> torch.Tensor:
         """
         Average non-padding token embeddings weighted by the attention mask.
-
-        Parameters
-        ----------
-        token_embeddings : (B, L, H)
-        attention_mask   : (B, L)   — 1 for real tokens, 0 for padding
-
-        Returns
-        -------
-        pooled : (B, H)
         """
         mask_expanded = attention_mask.unsqueeze(-1).float()          # (B, L, 1)
         sum_emb  = torch.sum(token_embeddings * mask_expanded, dim=1) # (B, H)
         sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)    # (B, 1)
         return sum_emb / sum_mask                                      # (B, H)
 
+    @staticmethod
+    def create_sliding_windows(text: str, tokenizer, max_len: int):
+        """
+        Divide long text into overlapping windows for processing.
+        Returns (list of input_ids tensors, list of attention_mask tensors).
+        """
+        # 1. Tokenize entire text without truncation
+        token_ids = tokenizer(text, add_special_tokens=False, return_tensors=None)["input_ids"]
+        
+        if not token_ids:
+            # Handle empty/tiny text
+            enc = tokenizer("", max_length=max_len, padding="max_length", truncation=True, return_tensors="pt")
+            return [enc["input_ids"][0]], [enc["attention_mask"][0]]
+
+        cls_id = tokenizer.cls_token_id
+        sep_id = tokenizer.sep_token_id
+        pad_id = tokenizer.pad_token_id
+        
+        # Max capacity for text chunk is max_len - 2 (CLS + SEP)
+        inner_len = max_len - 2
+        stride    = getattr(config, "SLIDING_STRIDE", inner_len // 2)
+        
+        input_ids_list = []
+        attention_mask_list = []
+        
+        start = 0
+        while start < len(token_ids):
+            end   = min(start + inner_len, len(token_ids))
+            chunk = token_ids[start:end]
+            
+            # [CLS] + chunk + [SEP] + [PAD]...
+            ids = [cls_id] + chunk + [sep_id]
+            pad_len = max_len - len(ids)
+            mask = [1] * len(ids) + [0] * pad_len
+            ids += [pad_id] * pad_len
+            
+            input_ids_list.append(torch.tensor(ids, dtype=torch.long))
+            attention_mask_list.append(torch.tensor(mask, dtype=torch.long))
+            
+            if end == len(token_ids):
+                break
+            start += stride
+            
+        return input_ids_list, attention_mask_list
+
     def forward(self, input_ids: torch.Tensor,
                 attention_mask: torch.Tensor) -> dict:
-        # 1. Backbone
+        """
+        Standard forward pass for a single window/batch.
+        """
         outputs = self.backbone(input_ids=input_ids,
                                 attention_mask=attention_mask)
 
-        # 2. Mean pool over real tokens (DeBERTa-v3 best practice)
         pooled = self._mean_pool(outputs.last_hidden_state, attention_mask)
-
-        # 3. Shared dropout
         pooled = self.dropout(pooled)
 
-        # 4. Per-task heads
         return {
             "bias":       self.bias_head(pooled),
-            "factuality": torch.sigmoid(self.fact_head(pooled)),  # → [0, 1]
+            "factuality": torch.sigmoid(self.fact_head(pooled)),
             "intent":     self.intent_head(pooled),
             "emotion":    self.emotion_head(pooled),
         }
-
-    @staticmethod
-    def create_sliding_windows(text: str, tokenizer, max_len: int):
-        enc = tokenizer(text, truncation=False, return_tensors="pt")
-        input_ids = enc["input_ids"].squeeze(0)
-        attention_mask = enc["attention_mask"].squeeze(0)
-        
-        seq_len = input_ids.size(0)
-        windows_ids = []
-        windows_masks = []
-        
-        if seq_len <= max_len:
-            pad_len = max_len - seq_len
-            w_ids = torch.cat([input_ids, torch.zeros(pad_len, dtype=input_ids.dtype, device=input_ids.device)])
-            w_mask = torch.cat([attention_mask, torch.zeros(pad_len, dtype=attention_mask.dtype, device=attention_mask.device)])
-            windows_ids.append(w_ids)
-            windows_masks.append(w_mask)
-            return windows_ids, windows_masks
-            
-        stride = max_len // 2
-        cls_token = input_ids[0:1]
-        sep_token = input_ids[-1:]
-        
-        inner_ids = input_ids[1:-1]
-        inner_mask = attention_mask[1:-1]
-        inner_max_len = max_len - 2
-        
-        for i in range(0, len(inner_ids), stride):
-            chunk_ids = inner_ids[i : i + inner_max_len]
-            chunk_mask = inner_mask[i : i + inner_max_len]
-            
-            w_ids = torch.cat([cls_token, chunk_ids, sep_token])
-            w_mask = torch.cat([attention_mask[0:1], chunk_mask, attention_mask[-1:]])
-            
-            if w_ids.size(0) < max_len:
-                pad_len = max_len - w_ids.size(0)
-                w_ids = torch.cat([w_ids, torch.zeros(pad_len, dtype=w_ids.dtype, device=w_ids.device)])
-                w_mask = torch.cat([w_mask, torch.zeros(pad_len, dtype=w_mask.dtype, device=w_mask.device)])
-                
-            windows_ids.append(w_ids)
-            windows_masks.append(w_mask)
-            
-        return windows_ids, windows_masks

@@ -16,7 +16,6 @@ or
 """
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
 import logging
 import traceback
 from datetime import datetime, timezone
@@ -125,7 +124,7 @@ def health():
     return {
         "status":      "ok",
         "model":       config.MODEL_NAME,
-        "device":      config.DEVICE,
+        "device":      str(config.DEVICE),
         "api_version": "2.0.0",
         "timestamp":   datetime.now(timezone.utc).isoformat(),
     }
