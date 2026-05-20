@@ -12,6 +12,7 @@ peft>=0.9.0                 # LoRA adapters for CredibleX v2
 # --- training utils ---
 scikit-learn>=1.3.2
 imbalanced-learn>=0.12.0      # SMOTE oversampling
+xgboost>=2.0.0                # load exported best_model.pkl classifier
 numpy>=1.24.0
 tqdm>=4.66.0
 seaborn>=0.13.0             # confusion matrix heatmap (evaluate_indian.py)

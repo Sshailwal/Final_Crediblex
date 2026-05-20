@@ -1,3 +1,7 @@
+import pickle
+import re
+from pathlib import Path
+
 import torch
 from transformers import AutoTokenizer
 from config import (DEVICE, MODEL_NAME, MAX_LEN, STRIDE, MAX_WINDOWS,
@@ -5,23 +9,90 @@ from config import (DEVICE, MODEL_NAME, MAX_LEN, STRIDE, MAX_WINDOWS,
                     NUM_INTENT_LABELS, NUM_EMOTION_LABELS)
 from model import CredibleXModel
 
-_MODEL_CACHE = {"model": None, "tokenizer": None}
+BASE_DIR = Path(__file__).resolve().parent
+CLASSICAL_MODEL_DIRS = [
+    BASE_DIR / "models" / "bias_classifier_v2",
+    BASE_DIR / "model",
+    BASE_DIR / "models",
+    BASE_DIR,
+]
+
+_MODEL_CACHE = {"kind": None, "model": None, "tokenizer": None, "labels": None}
 
 def _load_model_once():
-    if _MODEL_CACHE["model"] is not None:
-        return _MODEL_CACHE["model"], _MODEL_CACHE["tokenizer"]
+    if _MODEL_CACHE["kind"] is not None:
+        return _MODEL_CACHE
 
-    model = CredibleXModel()
-    checkpoint = torch.load(SAVE_PATH, map_location=DEVICE)
-    model.load_state_dict(checkpoint["model"])
-    model.to(DEVICE)
-    model.eval()
+    save_path = Path(SAVE_PATH)
+    if not save_path.is_absolute():
+        save_path = BASE_DIR / save_path
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    if save_path.exists():
+        model = CredibleXModel()
+        checkpoint = torch.load(save_path, map_location=DEVICE)
+        state = checkpoint.get("model") or checkpoint.get("model_state")
+        if state is None:
+            raise KeyError(f"Checkpoint {save_path} does not contain model weights")
+        model.load_state_dict(state)
+        model.to(DEVICE)
+        model.eval()
 
-    _MODEL_CACHE["model"]     = model
-    _MODEL_CACHE["tokenizer"] = tokenizer
-    return model, tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
+        _MODEL_CACHE["kind"] = "neural"
+        _MODEL_CACHE["model"] = model
+        _MODEL_CACHE["tokenizer"] = tokenizer
+        return _MODEL_CACHE
+
+    classical_dir = _find_classical_model_dir()
+    if classical_dir is not None:
+        model_path = classical_dir / "best_model.pkl"
+        vectorizer_path = classical_dir / "tfidf_vectorizer.pkl"
+        labels_path = classical_dir / "label_encoder.pkl"
+
+        model = None
+        vectorizer = None
+        labels = {}
+        if model_path.exists():
+            try:
+                with open(model_path, "rb") as fh:
+                    model = pickle.load(fh)
+            except ModuleNotFoundError as exc:
+                print(
+                    f"CredibleX warning: could not load {model_path.name} "
+                    f"because dependency {exc.name!r} is missing; using heuristic bias fallback."
+                )
+        if vectorizer_path.exists():
+            with open(vectorizer_path, "rb") as fh:
+                vectorizer = pickle.load(fh)
+        if labels_path.exists():
+            with open(labels_path, "rb") as fh:
+                labels = pickle.load(fh)
+
+        _MODEL_CACHE["kind"] = "classical"
+        _MODEL_CACHE["model"] = model
+        _MODEL_CACHE["tokenizer"] = vectorizer
+        _MODEL_CACHE["labels"] = labels
+        print(
+            "CredibleX warning: model_v1.pth was not found; "
+            f"using {classical_dir.relative_to(BASE_DIR)} fallback."
+        )
+        return _MODEL_CACHE
+
+    raise FileNotFoundError(
+        "No usable model found. Expected model_v1.pth or "
+        "best_model.pkl in model/, models/, or models/bias_classifier_v2/."
+    )
+
+
+def _find_classical_model_dir() -> Path | None:
+    for candidate in CLASSICAL_MODEL_DIRS:
+        if (candidate / "best_model.pkl").exists() or (
+            (candidate / "tfidf_vectorizer.pkl").exists()
+            and (candidate / "label_encoder.pkl").exists()
+        ):
+            return candidate
+    return None
 
 def create_sliding_windows(text, tokenizer):
     tokens = tokenizer(text, add_special_tokens=False)["input_ids"]
@@ -53,7 +124,12 @@ def _factuality_label(score: float) -> str:
     return "false"
 
 def run_inference(text: str) -> dict:
-    model, tokenizer = _load_model_once()
+    loaded = _load_model_once()
+    if loaded["kind"] == "classical":
+        return _run_classical_inference(text, loaded)
+
+    model = loaded["model"]
+    tokenizer = loaded["tokenizer"]
     amp_enabled      = DEVICE.type == "cuda"   # correct comparison
 
     windows = create_sliding_windows(text, tokenizer)
@@ -213,6 +289,192 @@ def _calculate_credibility(fact_score, bias_data, intent_data, top_emotions):
         score *= 0.6
 
     return int(max(0, min(100, score)))
+
+
+def _run_classical_inference(text: str, loaded: dict) -> dict:
+    """Fallback inference for the exported TF-IDF bias classifier."""
+    model = loaded["model"]
+    vectorizer = loaded["tokenizer"]
+
+    X = vectorizer.transform([text]) if vectorizer is not None else [text]
+    if model is not None:
+        pred_id = int(model.predict(X)[0])
+        raw_probs = _class_probabilities(model, X, pred_id)
+    else:
+        pred_id, raw_probs = _heuristic_bias(text)
+
+    bias_labels = ["left", "slightly_left", "center", "slightly_right", "right"]
+    bias_label = bias_labels[pred_id] if 0 <= pred_id < len(bias_labels) else "center"
+    bias_conf = float(raw_probs[pred_id]) if pred_id < len(raw_probs) else 0.5
+    distribution = {
+        bias_labels[i]: round(float(raw_probs[i]), 3)
+        for i in range(min(len(raw_probs), len(bias_labels)))
+    }
+
+    fact_score = _heuristic_factuality(text)
+    intent_label, intent_conf = _heuristic_intent(text)
+    top_emotions = _heuristic_emotions(text)
+    trust_score = _calculate_credibility(
+        fact_score,
+        {"label": bias_label, "confidence": bias_conf},
+        {"label": intent_label, "confidence": intent_conf},
+        top_emotions,
+    )
+
+    if trust_score >= 80:
+        verdict = "Highly Credible"
+    elif trust_score >= 60:
+        verdict = "Mostly Credible"
+    elif trust_score >= 40:
+        verdict = "Mixed Reliability"
+    elif trust_score >= 20:
+        verdict = "Low Credibility"
+    else:
+        verdict = "Fabricated / Fake"
+
+    return {
+        "windows_processed": 1,
+        "trust_score": trust_score,
+        "verdict": verdict,
+        "bias": {
+            "label": bias_label,
+            "confidence": round(bias_conf, 3),
+            "distribution": distribution,
+        },
+        "factuality": {
+            "score": round(fact_score, 3),
+            "label": _factuality_label(fact_score),
+        },
+        "intent": {
+            "label": intent_label,
+            "confidence": round(intent_conf, 3),
+        },
+        "emotion": {
+            "top": top_emotions,
+        },
+    }
+
+
+def _class_probabilities(model, X, pred_id: int) -> list[float]:
+    if hasattr(model, "predict_proba"):
+        probs = model.predict_proba(X)[0]
+        return [float(p) for p in probs]
+
+    if hasattr(model, "decision_function"):
+        scores = model.decision_function(X)
+        scores = scores[0] if getattr(scores, "ndim", 1) > 1 else scores
+        scores = [float(s) for s in scores]
+        max_score = max(scores)
+        exps = [pow(2.718281828, s - max_score) for s in scores]
+        total = sum(exps) or 1.0
+        return [e / total for e in exps]
+
+    probs = [0.0] * 5
+    probs[pred_id] = 1.0
+    return probs
+
+
+def _heuristic_factuality(text: str) -> float:
+    lower = text.lower()
+    score = 0.62
+
+    sensational = [
+        "shocking", "miracle", "you won't believe", "exposed", "secret",
+        "conspiracy", "hoax", "must share", "forward this", "breaking!!!",
+    ]
+    evidence = [
+        "according to", "reported", "data", "study", "court", "official",
+        "statement", "ministry", "police", "agency", "commission",
+    ]
+
+    score += min(0.18, 0.03 * sum(1 for word in evidence if word in lower))
+    score -= min(0.28, 0.05 * sum(1 for word in sensational if word in lower))
+    if re.search(r"https?://|www\.", lower):
+        score += 0.03
+    if len(text.split()) < 80:
+        score -= 0.08
+    if sum(1 for ch in text if ch == "!") >= 3:
+        score -= 0.08
+
+    return float(max(0.05, min(0.95, score)))
+
+
+def _heuristic_intent(text: str) -> tuple[str, float]:
+    lower = text.lower()
+    satire_terms = ["satire", "parody", "spoof", "humor", "comedy"]
+    opinion_terms = [
+        "opinion", "editorial", "i think", "we believe", "should",
+        "must", "ought", "column", "viewpoint",
+    ]
+
+    if any(term in lower for term in satire_terms):
+        return "satire", 0.82
+    if any(term in lower for term in opinion_terms):
+        return "opinion", 0.72
+    return "news", 0.68
+
+
+def _heuristic_bias(text: str) -> tuple[int, list[float]]:
+    lower = text.lower()
+    left_terms = [
+        "worker", "workers", "union", "progressive", "inequality",
+        "public healthcare", "welfare", "climate justice", "billionaire",
+    ]
+    right_terms = [
+        "lower taxes", "border", "national identity", "free market",
+        "traditional", "conservative", "law and order", "small government",
+    ]
+    far_left_terms = ["seize power", "capitalist", "revolution", "far left"]
+    far_right_terms = ["radical left", "open borders", "globalist", "far right"]
+
+    score = 0
+    score -= 2 * sum(1 for term in far_left_terms if term in lower)
+    score -= sum(1 for term in left_terms if term in lower)
+    score += sum(1 for term in right_terms if term in lower)
+    score += 2 * sum(1 for term in far_right_terms if term in lower)
+
+    if score <= -3:
+        pred_id = 0
+    elif score <= -1:
+        pred_id = 1
+    elif score >= 3:
+        pred_id = 4
+    elif score >= 1:
+        pred_id = 3
+    else:
+        pred_id = 2
+
+    probs = [0.08, 0.14, 0.56, 0.14, 0.08]
+    probs[pred_id] = 0.68
+    remainder = 0.32
+    for idx in range(5):
+        if idx != pred_id:
+            probs[idx] = remainder / 4
+    return pred_id, probs
+
+
+def _heuristic_emotions(text: str) -> list[dict]:
+    lower = text.lower()
+    buckets = {
+        "anger": ["outrage", "angry", "furious", "corrupt", "betrayal"],
+        "fear": ["fear", "threat", "danger", "panic", "risk"],
+        "sadness": ["tragic", "grief", "sad", "death", "loss"],
+        "optimism": ["hope", "progress", "improve", "success", "win"],
+        "neutral": [],
+    }
+
+    found = []
+    for label, words in buckets.items():
+        if label == "neutral":
+            continue
+        hits = sum(1 for word in words if word in lower)
+        if hits:
+            found.append({"label": label, "score": round(min(0.9, 0.35 + hits * 0.12), 3)})
+
+    if not found:
+        found.append({"label": "neutral", "score": 0.5})
+
+    return sorted(found, key=lambda item: item["score"], reverse=True)[:3]
 
 if __name__ == "__main__":
     from transformers import AutoTokenizer

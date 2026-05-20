@@ -19,7 +19,7 @@ from imblearn.over_sampling import SMOTE
 
 # ── PATH CONSTANTS ───────────────────────────────────────────────────────────
 DATASET_A_PATH           = "training_data_backup_20260426_013442.csv"
-DATASET_B_PATH           = "data/indian_bias_labeled.csv"
+DATASET_B_PATH           = "indian_bias_labeled.csv"
 PROCESSED_DIR            = "data/processed/"
 TRAIN_PATH               = "data/processed/train_v2.csv"
 VAL_PATH                 = "data/processed/val_v2.csv"
@@ -30,6 +30,9 @@ RANDOM_STATE             = 42
 TEST_SIZE                = 0.10
 VAL_SIZE                 = 0.10
 MAX_TFIDF_FEATURES       = 10000
+
+SMOTE_CHUNK_SIZE         = 2000
+TFIDF_DTYPE              = "float32"
 
 VALID_LABELS = {0, 1, 2, 3, 4}
 LABEL_STR_MAP = {
@@ -216,67 +219,77 @@ def merge_and_rebalance(df_a: pd.DataFrame, df_b: pd.DataFrame) -> pd.DataFrame:
     balanced_frames = []
 
     # Fit TF-IDF once on the deduplicated merged text (for SMOTE use)
-    tfidf = TfidfVectorizer(max_features=MAX_TFIDF_FEATURES)
+    tfidf = TfidfVectorizer(
+        max_features=MAX_TFIDF_FEATURES,
+        dtype=np.float32
+    )
     X_all = tfidf.fit_transform(df_merged["text"])
 
-    smote_needed = any(
-        cnt < TARGET_SAMPLES_PER_CLASS
-        for cnt in dist_before.values
-    )
+    from scipy.sparse import vstack, csr_matrix
 
-    if smote_needed:
-        # Determine classes needing oversampling & their target
-        smote_strategy = {
-            int(lbl): TARGET_SAMPLES_PER_CLASS
-            for lbl, cnt in dist_before.items()
-            if cnt < TARGET_SAMPLES_PER_CLASS
-        }
-        log_ok(f"Applying SMOTE for classes: {list(smote_strategy.keys())}")
-        smote = SMOTE(
-            sampling_strategy=smote_strategy,
-            random_state=RANDOM_STATE,
-            k_neighbors=min(5, int(dist_before.min()) - 1)
-        )
-        y_all = df_merged["bias_label"].values
-        X_res, y_res = smote.fit_resample(X_all, y_all)
-
-        n_orig = len(df_merged)
-        n_synthetic = X_res.shape[0] - n_orig
-        log_ok(f"SMOTE generated {n_synthetic} synthetic samples -- finding nearest-neighbor texts ...")
-
-        # Map synthetic TF-IDF vectors -> nearest real text (cosine distance)
-        nn = NearestNeighbors(n_neighbors=1, metric="cosine", algorithm="brute")
-        nn.fit(X_all)
-        X_syn = X_res[n_orig:]
-        _, nn_indices = nn.kneighbors(X_syn)
-        nn_indices = nn_indices.ravel()
-
-        orig_texts = df_merged["text"].values
-        syn_texts  = [f"{orig_texts[i]} [syn-{j}]" for j, i in enumerate(nn_indices)]
-
-        # Build synthetic DataFrame
-        syn_meta = df_merged.iloc[nn_indices][SCHEMA_A_COLS].copy().reset_index(drop=True)
-        syn_meta["text"]       = syn_texts
-        syn_meta["bias_label"] = y_res[n_orig:].astype("int64")
-        syn_meta["source"]     = "smote_synthetic"
-
-        df_merged = pd.concat([df_merged, syn_meta], ignore_index=True)
-        log_ok(f"Dataset after SMOTE: {len(df_merged):,} rows")
-
-    # Per-class undersample to exactly TARGET_SAMPLES_PER_CLASS
     for lbl in sorted(VALID_LABELS):
-        df_cls = df_merged[df_merged["bias_label"] == lbl]
+        df_cls = df_merged[df_merged["bias_label"] == lbl].copy()
         cnt = len(df_cls)
-        if cnt > TARGET_SAMPLES_PER_CLASS:
+        
+        if cnt < TARGET_SAMPLES_PER_CLASS:
+            S = TARGET_SAMPLES_PER_CLASS - cnt
+            log_ok(f"Class {lbl}: needs SMOTE oversampling ({cnt} -> {TARGET_SAMPLES_PER_CLASS}, generating {S} samples)")
+            
+            cls_indices = df_merged.index[df_merged["bias_label"] == lbl].tolist()
+            X_class = X_all[cls_indices]
+            N = X_class.shape[0]
+            
+            chunk_size = SMOTE_CHUNK_SIZE if N > 4000 else S
+            
+            syn_chunks = []
+            bytes_generated = 0
+            
+            while bytes_generated < S:
+                chunk_s = min(chunk_size, S - bytes_generated)
+                
+                X_dummy = csr_matrix((N + chunk_s, X_class.shape[1]), dtype=np.float32)
+                y_dummy = np.full(N + chunk_s, -1, dtype=np.int64)
+                
+                X_temp = vstack([X_class, X_dummy])
+                y_temp = np.concatenate([np.full(N, lbl, dtype=np.int64), y_dummy])
+                
+                smote = SMOTE(
+                    sampling_strategy={lbl: N + chunk_s},
+                    random_state=RANDOM_STATE,
+                    k_neighbors=min(5, N - 1)
+                )
+                X_res_temp, y_res_temp = smote.fit_resample(X_temp, y_temp)
+                
+                X_res_c = X_res_temp[y_res_temp == lbl]
+                X_syn_chunk = X_res_c[N:]
+                syn_chunks.append(X_syn_chunk)
+                
+                bytes_generated += chunk_s
+                
+            X_syn = vstack(syn_chunks)
+            
+            nn = NearestNeighbors(n_neighbors=1, metric="cosine", algorithm="brute", n_jobs=1)
+            nn.fit(X_class)
+            _, nn_indices = nn.kneighbors(X_syn)
+            nn_indices = nn_indices.ravel()
+            
+            orig_texts = df_cls["text"].values
+            syn_texts = [f"{orig_texts[idx]} [syn-{j}]" for j, idx in enumerate(nn_indices)]
+            
+            syn_meta = df_cls.iloc[nn_indices][SCHEMA_A_COLS].copy().reset_index(drop=True)
+            syn_meta["text"] = syn_texts
+            syn_meta["bias_label"] = lbl
+            syn_meta["source"] = "smote_synthetic"
+            
+            df_cls = pd.concat([df_cls, syn_meta], ignore_index=True)
+            log_ok(f"Class {lbl}: balanced to {len(df_cls)} samples via SMOTE")
+            
+        elif cnt > TARGET_SAMPLES_PER_CLASS:
             df_cls = df_cls.sample(n=TARGET_SAMPLES_PER_CLASS, random_state=RANDOM_STATE)
             log_warn(f"Class {lbl}: undersampled {cnt} -> {TARGET_SAMPLES_PER_CLASS}")
-        elif cnt == TARGET_SAMPLES_PER_CLASS:
-            log_ok(f"Class {lbl}: exactly {TARGET_SAMPLES_PER_CLASS} -- no change needed")
         else:
-            # Still short (shouldn't happen after SMOTE, but safeguard)
-            log_warn(f"Class {lbl}: still short ({cnt}) after SMOTE -- random oversample")
-            df_cls = df_cls.sample(n=TARGET_SAMPLES_PER_CLASS,
-                                   replace=True, random_state=RANDOM_STATE)
+            log_ok(f"Class {lbl}: exactly {TARGET_SAMPLES_PER_CLASS} -- no change needed")
+            
         balanced_frames.append(df_cls)
 
     df_balanced = pd.concat(balanced_frames, ignore_index=True)

@@ -1,6 +1,7 @@
 import json, time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse, unquote
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -192,10 +193,38 @@ def analyze_url(request: AnalyzeURLRequest):
 
     article = extract_article(request.url)
     if article is None or article.get("text", "").strip() == "":
-        raise HTTPException(status_code=422, detail={
-            "message": "Could not extract article text from the provided URL. The site may block scrapers, require login, or have no readable content.",
-            "url": request.url
+        fallback_text, fallback_metadata = _fallback_text_from_url(request.url)
+        t0 = time.time()
+        result = run_inference(fallback_text)
+        latency_ms = round((time.time() - t0) * 1000, 1)
+        result["latency_ms"] = latency_ms
+
+        response = _shape_response(result, fallback_metadata)
+        response["url"] = request.url
+        response["input_chars"] = len(fallback_text)
+        response["extraction_warning"] = (
+            "Could not extract the full article text. The site may block scrapers, "
+            "require login, or have no readable article body. This result uses URL "
+            "metadata only, so treat it as a weak signal."
+        )
+        response["key_findings"].insert(0, {
+            "type": "warn",
+            "icon": "⚠️",
+            "text": "Full article text could not be extracted; analysis used URL metadata only."
         })
+
+        _append_log({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "endpoint": "analyze-url",
+            "url": request.url,
+            "chars": len(fallback_text),
+            "latency_ms": latency_ms,
+            "fallback": True,
+            "bias_label": result["bias"]["label"],
+            "fact_score": result["factuality"]["score"],
+            "intent_label": result["intent"]["label"]
+        })
+        return response
 
     t0 = time.time()
     result = run_inference(article["text"])
@@ -224,6 +253,25 @@ def analyze_url(request: AnalyzeURLRequest):
     })
     return response
 
+
+def _fallback_text_from_url(url: str) -> tuple[str, dict]:
+    parsed = urlparse(url)
+    source = parsed.netloc.replace("www.", "") or "Unknown source"
+    path_text = unquote(parsed.path).replace("-", " ").replace("_", " ")
+    path_text = " ".join(part for part in path_text.split("/") if part)
+    title = path_text.title() if path_text else "URL Analysis"
+    fallback_text = (
+        f"News URL from {source}. Headline or slug: {path_text or url}. "
+        "The full article body could not be extracted from the source page, "
+        "so this analysis is based only on visible URL metadata and should be "
+        "treated as a low-confidence preview."
+    )
+    return fallback_text, {
+        "title": title,
+        "author": source,
+        "date": "Unknown",
+    }
+
 @app.get("/logs")
 def get_logs():
     try:
@@ -245,4 +293,4 @@ async def startup():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api:app", host="0.0.0.0", port=7860, reload=False)
+    uvicorn.run("api:app", host="127.0.0.1", port=7860, reload=False)

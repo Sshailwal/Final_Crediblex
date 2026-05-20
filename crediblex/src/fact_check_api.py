@@ -24,7 +24,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-_ENDPOINT = "https://factchecktools.googleapis.com/v1alpha1/claims:search"
+_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 
 # Textual rating -> [0, 1] score mapping (case-insensitive substring matching)
 _RATING_MAP: dict[str, float] = {
@@ -72,17 +72,17 @@ class FactCheckClient:
         Initialise the client.
 
         Args:
-            api_key:   Google Fact Check API key. Falls back to the env var
-                       ``GOOGLE_FACT_CHECK_API_KEY`` if not provided.
+            api_key:   OpenAI API key. Falls back to the env var
+                       ``OPENAI_API_KEY`` if not provided.
             rpm_limit: Token-bucket capacity (calls per minute). Default 60.
 
         Raises:
             ValueError: If no API key can be resolved from args or environment.
         """
-        self.api_key: str = api_key or os.getenv("GOOGLE_FACT_CHECK_API_KEY", "")
+        self.api_key: str = api_key or os.getenv("OPENAI_API_KEY", os.getenv("GOOGLE_FACT_CHECK_API_KEY", ""))
         if not self.api_key:
             raise ValueError(
-                "No API key provided. Set GOOGLE_FACT_CHECK_API_KEY in your .env file "
+                "No API key provided. Set OPENAI_API_KEY in your .env file "
                 "or pass api_key= to FactCheckClient()."
             )
 
@@ -100,76 +100,65 @@ class FactCheckClient:
         max_results: int = 5,
     ) -> dict:
         """
-        Search the Fact Check Tools API for claims matching *query*.
-
-        The query is silently truncated to 500 characters (API limit).
-
+        Search the ChatGPT API for claims matching *query*.
+        
         Args:
             query:         The claim or headline text to look up.
-            language_code: BCP-47 language tag (e.g. ``"en"``, ``"hi"``).
-            max_results:   Maximum number of results to request (1–10).
+            language_code: BCP-47 language tag (unused by ChatGPT, but kept for signature).
+            max_results:   Unused by ChatGPT.
 
         Returns:
             A dict with keys::
-
                 {
-                    "found":     bool,          # True if at least one result returned
-                    "rating":    str,            # Human-readable rating string
-                    "publisher": str,            # Fact-checker organisation name
-                    "url":       str,            # URL of the fact-check article
-                    "score":     float,          # Normalised [0, 1] credibility score
+                    "found":     bool,
+                    "rating":    str,
+                    "publisher": str,
+                    "url":       str,
+                    "score":     float,
                 }
-
-            If nothing is found or an error occurs the :meth:`_empty_signal`
-            value is returned so callers never have to guard for ``None``.
         """
         self._rate_limit()
 
-        query = query[:500]  # hard API limit
+        query = query[:1000]
 
-        params: dict = {
-            "key": self.api_key,
-            "query": query,
-            "languageCode": language_code,
-            "pageSize": max(1, min(max_results, 10)),
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": "gpt-3.5-turbo",
+            "messages": [
+                {"role": "system", "content": "You are an expert fact-checker. Determine the veracity of the following claim. Reply with exactly one word from the following: True, False, Misleading, Unverified. Do not explain."},
+                {"role": "user", "content": f"Claim: {query}"}
+            ],
+            "temperature": 0.0,
+            "max_tokens": 10
         }
 
         try:
-            response = requests.get(
+            response = requests.post(
                 _ENDPOINT,
-                params=params,
+                headers=headers,
+                json=payload,
                 timeout=10,
             )
             response.raise_for_status()
         except requests.exceptions.Timeout:
-            logger.warning("Fact Check API request timed out for query: %.80s", query)
+            logger.warning("ChatGPT API request timed out for query: %.80s", query)
             return self._empty_signal()
         except requests.exceptions.RequestException as exc:
-            logger.error("Fact Check API request failed: %s", exc)
+            logger.error("ChatGPT API request failed: %s", exc)
             return self._empty_signal()
 
         data: dict = response.json()
-        claims: list = data.get("claims", [])
-
-        if not claims:
-            return self._empty_signal()
-
-        # Use the first (highest-relevance) claim
-        claim: dict = claims[0]
-        review: dict = {}
-        reviews: list = claim.get("claimReview", [])
-        if reviews:
-            review = reviews[0]
-
-        rating_text: str = review.get("textualRating", "Unknown")
-        publisher: str = review.get("publisher", {}).get("name", "Unknown")
-        url: str = review.get("url", "")
+        rating_text: str = data["choices"][0]["message"]["content"].strip()
 
         return {
             "found": True,
             "rating": rating_text,
-            "publisher": publisher,
-            "url": url,
+            "publisher": "OpenAI ChatGPT",
+            "url": "",
             "score": self._rating_to_score(rating_text),
         }
 

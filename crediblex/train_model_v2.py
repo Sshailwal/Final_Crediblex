@@ -9,7 +9,7 @@ import os
 import sys
 import json
 import pickle
-import contextlib
+import time
 from datetime import datetime, timezone
 
 import numpy as np
@@ -113,6 +113,7 @@ def build_features():
         min_df        = 2,
         strip_accents = "unicode",
         analyzer      = "word",
+        dtype         = np.float32,
     )
     X_train = vectorizer.fit_transform(X_train_raw)
     X_val   = vectorizer.transform(X_val_raw)
@@ -157,6 +158,28 @@ def _eval_model(name, model, X_val, y_val):
 def baseline_sweep(X_train, y_train, X_val, y_val):
     log_ok("Starting baseline model sweep ...")
 
+    try:
+        import xgboost as xgb
+        xgb_clf = xgb.XGBClassifier(
+            n_estimators  = 200,
+            learning_rate = 0.1,
+            max_depth     = 6,
+            device        = "cpu",
+            n_jobs        = 1,
+            random_state  = RANDOM_STATE,
+            use_label_encoder = False,
+            eval_metric   = "mlogloss",
+        )
+        xgb_name = "XGBoost"
+    except ImportError:
+        xgb_clf = GradientBoostingClassifier(
+            n_estimators  = 200,
+            learning_rate = 0.1,
+            max_depth     = 6,
+            random_state  = RANDOM_STATE,
+        )
+        xgb_name = "GradientBoosting"
+
     candidates = [
         ("LogisticRegression",
          LogisticRegression(C=1.0, max_iter=1000, multi_class="multinomial",
@@ -165,14 +188,25 @@ def baseline_sweep(X_train, y_train, X_val, y_val):
          CalibratedClassifierCV(LinearSVC(C=1.0, max_iter=2000, random_state=RANDOM_STATE))),
         ("MultinomialNB",
          MultinomialNB(alpha=0.1)),
+        ("RandomForest",
+         RandomForestClassifier(n_estimators=200, max_depth=None, n_jobs=1, random_state=RANDOM_STATE)),
+        (xgb_name, xgb_clf),
     ]
 
     all_results = []
-    for name, model in candidates:
-        log_ok(f"Training {name} ...")
+    total_candidates = len(candidates)
+    start_time = time.time()
+    for idx, (name, model) in enumerate(candidates, 1):
+        log_ok(f"Training {name} ({idx}/{total_candidates}) ...")
         model.fit(X_train, y_train)
         res = _eval_model(name, model, X_val, y_val)
         all_results.append(res)
+        # ETA calculation
+        elapsed = time.time() - start_time
+        remaining = (total_candidates - idx) * (elapsed / idx)
+        eta = time.strftime('%M:%S', time.gmtime(remaining))
+        log_ok(f"Completed {name}. ETA for remaining models: {eta}")
+
 
     # Ranked comparison table
     all_results.sort(key=lambda r: r["val_mf1"], reverse=True)
@@ -265,9 +299,9 @@ def tune_model(best: dict, X_train, y_train, X_val, y_val, X_test, y_test,
         scoring    = "f1_macro",
         cv         = cv,
         random_state = RANDOM_STATE,
-        n_jobs     = -1,
+        n_jobs     = 1,
         refit      = True,
-        verbose    = 0,
+        verbose    = 3,
     )
     search.fit(X_train, y_train)
     log_ok(f"Best params: {search.best_params_}")
@@ -446,6 +480,7 @@ def main():
     print(f"  FINAL MODEL -- TEST SET RESULTS")
     print(f"    Model          : {best_baseline['name']}")
     print(f"    Accuracy       : {test_acc:.4f}")
+    print(f"    Error Rate     : {1.0 - test_acc:.4f}")
     print(f"    Macro F1       : {final_test_mf1:.4f}")
     print(f"    Weighted F1    : {test_wf1:.4f}")
     print(f"    Per-class F1:")

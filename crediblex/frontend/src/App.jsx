@@ -6,7 +6,7 @@ import BiasSlider from './components/BiasSlider';
 import { FactualityBar, IntentChip, EmotionChip } from './components/Badges';
 import History from './components/History';
 
-const API = 'http://localhost:7860';
+const API = 'http://127.0.0.1:7860';
 const MAX_HISTORY = 5;
 
 const TIER_COLOR = (score) => {
@@ -237,7 +237,7 @@ export default function App() {
       setState('success');
       saveToHistory(data, type, value);
     } catch (err) {
-      setErrMsg(err.message || 'Network error — is the API running on port 8000?');
+      setErrMsg(err.message || 'Network error — is the API running on port 7860?');
       setState('error');
     }
   };
