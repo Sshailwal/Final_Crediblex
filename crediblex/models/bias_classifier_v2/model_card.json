@@ -1,0 +1,29 @@
+{
+  "model_name": "bias_classifier_v2",
+  "trained_at": "2026-05-19T17:46:09.251466+00:00",
+  "best_model_type": "LinearSVC (Calibrated)",
+  "hyperparameter_tuned": false,
+  "best_params": {
+    "estimator__C": 1
+  },
+  "val_macro_f1": 0.912198,
+  "test_macro_f1": 0.933336,
+  "test_accuracy": 0.933464,
+  "test_weighted_f1": 0.933323,
+  "per_class_f1_test": {
+    "Far Left": 0.982435,
+    "Left": 0.929065,
+    "Center": 0.876952,
+    "Right": 0.887425,
+    "Far Right": 0.990803
+  },
+  "training_samples": 32584,
+  "val_samples": 4073,
+  "test_samples": 4073,
+  "vectorizer": "TF-IDF",
+  "tfidf_max_features": 10000,
+  "ngram_range": "(1,2)",
+  "random_state": 42,
+  "dataset_version": "v2",
+  "cv_folds": 5
+}

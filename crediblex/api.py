@@ -1,250 +1,248 @@
-"""
-api.py — CredibleX FastAPI Server
-===================================
-Endpoints
----------
-GET  /health          → uptime check, model info
-POST /analyze         → {url}  → full trust report (scrapes article)
-POST /analyze-text    → {text} → full trust report (raw text / WhatsApp)
-GET  /logs            → recent request log
-
-Run locally
------------
-    python api.py
-or
-    uvicorn api:app --reload --port 8000
-"""
-
-import os
-import logging
-import traceback
+import json, time
 from datetime import datetime, timezone
-
-import uvicorn
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from pathlib import Path
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from config import LOG_PATH, DEVICE
 
-import config
-from inference import analyze_url, analyze_text, generate_report
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Logging
-# ─────────────────────────────────────────────────────────────────────────────
-LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api_requests.log")
-
-logging.basicConfig(
-    level   = logging.INFO,
-    format  = "%(asctime)s | %(levelname)s | %(message)s",
-    handlers = [
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger("crediblex")
-
-_request_log: list[dict] = []
-_MAX_LOG     = 200
-
-
-def _append_log(entry: dict) -> None:
-    _request_log.append(entry)
-    if len(_request_log) > _MAX_LOG:
-        _request_log.pop(0)
-    logger.info(
-        "ANALYZED | url=%-60s | score=%-5s | verdict=%s | elapsed=%.2fs",
-        entry.get("url", ""),
-        entry.get("score", "err"),
-        entry.get("verdict", "error"),
-        entry.get("elapsed_s", 0.0),
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# App
-# ─────────────────────────────────────────────────────────────────────────────
-app = FastAPI(
-    title       = "CredibleX API",
-    description = "News trust-scoring API. POST a URL or raw text to get a credibility report.",
-    version     = "2.0.0",
-)
+app = FastAPI(title="CredibleX API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = ["http://localhost:5173", "http://127.0.0.1:5173", "*"],
-    allow_credentials = False,
-    allow_methods     = ["*"],
-    allow_headers     = ["*"],
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"]
 )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Pydantic request models
-# ─────────────────────────────────────────────────────────────────────────────
 class AnalyzeRequest(BaseModel):
-    url: str
+    text: str = Field(..., min_length=50, max_length=20000)
 
-class TextRequest(BaseModel):
-    text: str
+class AnalyzeURLRequest(BaseModel):
+    url: str = Field(..., min_length=10, max_length=500)
 
+def _append_log(entry: dict):
+    Path(LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
+    with open(LOG_PATH, "a") as f:
+        f.write(json.dumps(entry) + "\n")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Global exception handler
-# ─────────────────────────────────────────────────────────────────────────────
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.error("Unhandled exception: %s\n%s", exc, traceback.format_exc())
-    return JSONResponse(
-        status_code = 500,
-        content     = {"error": "internal_server_error", "detail": str(exc)},
+BIAS_LABEL_MAP = {
+    "slightly_left":  "Slightly Left",
+    "left":           "Left",
+    "center":         "Center",
+    "right":          "Right",
+    "slightly_right": "Slightly Right",
+}
+
+INTENT_LABEL_MAP = {
+    "news":    "News",
+    "opinion": "Opinion",
+    "satire":  "Satire",
+}
+
+def _shape_response(result: dict, metadata: dict = None) -> dict:
+    """
+    Converts the V2 inference output into the nested schema the frontend expects.
+    Frontend expects: score, verdict, dimensions, metadata, key_findings, summary
+    """
+    fact_score  = result["factuality"]["score"]
+    fact_label  = result["factuality"]["label"]
+    bias_raw    = result["bias"]["label"]
+    bias_conf   = result["bias"]["confidence"]
+    intent_raw  = result["intent"]["label"]
+    intent_conf = result["intent"]["confidence"]
+    top_emotions = result["emotion"].get("top", [])
+
+    bias_display   = BIAS_LABEL_MAP.get(bias_raw, bias_raw.title())
+    intent_display = INTENT_LABEL_MAP.get(intent_raw, intent_raw.title())
+    emotion_display = top_emotions[0]["label"].title() if top_emotions else "Neutral"
+
+    # ── Key Findings ──────────────────────────────────────────────────────────
+    findings = []
+
+    if fact_score >= 0.7:
+        findings.append({"type": "good", "icon": "✅", "text": f"Factuality score is high ({round(fact_score*100)}%), indicating mostly verified claims."})
+    elif fact_score >= 0.4:
+        findings.append({"type": "warn", "icon": "⚠️", "text": f"Factuality score is moderate ({round(fact_score*100)}%). Some claims may be unverified."})
+    else:
+        findings.append({"type": "bad", "icon": "🚨", "text": f"Low factuality score ({round(fact_score*100)}%). Content may contain misinformation."})
+
+    if bias_raw == "center":
+        findings.append({"type": "good", "icon": "⚖️", "text": "Political bias is centrist — balanced reporting detected."})
+    elif bias_raw in ["slightly_left", "slightly_right"]:
+        findings.append({"type": "warn", "icon": "📰", "text": f"Mild political lean detected: {bias_display} (confidence: {round(bias_conf*100)}%)."})
+    else:
+        findings.append({"type": "bad", "icon": "📢", "text": f"Strong political bias detected: {bias_display} (confidence: {round(bias_conf*100)}%)."})
+
+    if intent_raw == "satire":
+        findings.append({"type": "warn", "icon": "🎭", "text": "Content is identified as satire — not intended as factual reporting."})
+    elif intent_raw == "opinion":
+        findings.append({"type": "info", "icon": "💬", "text": "Content appears to be opinion/editorial, not straight news."})
+    else:
+        findings.append({"type": "good", "icon": "📄", "text": f"Intent classified as news reporting (confidence: {round(intent_conf*100)}%)."})
+
+    if top_emotions:
+        emo_names = ", ".join([e["label"] for e in top_emotions])
+        findings.append({"type": "info", "icon": "🧠", "text": f"Dominant emotional tone: {emo_names}."})
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    verdict = result["verdict"]
+    summary = (
+        f"This content received a Trust Score of {result['trust_score']}/100 — classified as '{verdict}'. "
+        f"Factuality is {fact_label.replace('_', ' ')} at {round(fact_score*100)}%. "
+        f"The political framing is {bias_display} and the intent is classified as {intent_display}. "
+        f"{'Emotional framing is present: ' + emotion_display + '.' if top_emotions else 'No strong emotional framing detected.'}"
     )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper: check model weights exist
-# ─────────────────────────────────────────────────────────────────────────────
-def _assert_model_exists():
-    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), config.SAVE_PATH)
-    if not os.path.isfile(model_path):
-        raise HTTPException(
-            status_code = 503,
-            detail = {
-                "error":   "model_unavailable",
-                "message": f"Trained model weights not found at '{config.SAVE_PATH}'. Run train.py first.",
-            },
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GET /health
-# ─────────────────────────────────────────────────────────────────────────────
-@app.get("/health", summary="Health / uptime check")
-def health():
+    # ── Build final response matching frontend schema ──────────────────────────
     return {
-        "status":      "ok",
-        "model":       config.MODEL_NAME,
-        "device":      str(config.DEVICE),
-        "api_version": "2.0.0",
-        "timestamp":   datetime.now(timezone.utc).isoformat(),
+        "score":   result["trust_score"],
+        "verdict": verdict,
+        "dimensions": {
+            "factuality": {
+                "value":       fact_score,
+                "label":       fact_label,
+                "weight":      "50%",
+                "explanation": f"The model scored this content {round(fact_score*100)}% on factuality based on language patterns, claim structure, and comparison with known factual sources."
+            },
+            "bias": {
+                "value":        bias_display,
+                "label":        bias_raw,
+                "confidence":   bias_conf,
+                "distribution": result["bias"].get("distribution", {}),
+                "weight":       "20%",
+                "explanation":  f"Detected a {bias_display} leaning with {round(bias_conf*100)}% confidence based on word choice and framing."
+            },
+            "intent": {
+                "value":       intent_display,
+                "label":       intent_raw,
+                "confidence":  intent_conf,
+                "weight":      "15%",
+                "explanation": f"Content was classified as {intent_display} with {round(intent_conf*100)}% confidence."
+            },
+            "emotion": {
+                "value":       emotion_display,
+                "top":         top_emotions,
+                "weight":      "15%",
+                "explanation": f"{'Top emotional signals: ' + ', '.join([e['label'] for e in top_emotions]) + '.' if top_emotions else 'No dominant emotional tone detected — content appears relatively neutral.'}"
+            }
+        },
+        "metadata": metadata or {
+            "title":  "Text Analysis",
+            "author": "Unknown",
+            "date":   "Unknown"
+        },
+        "key_findings": findings,
+        "summary":       summary,
+        # Pass-through raw fields for any advanced consumers
+        "_raw": {
+            "windows_processed": result.get("windows_processed", 1),
+            "trust_score":       result["trust_score"],
+            "latency_ms":        result.get("latency_ms", 0)
+        }
     }
 
+@app.get("/health")
+def health():
+    return {"status": "ok", "device": str(DEVICE)}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# POST /analyze   — URL → scrape + model
-# ─────────────────────────────────────────────────────────────────────────────
-@app.post("/analyze", summary="Analyze a news article URL")
-def analyze(request: AnalyzeRequest):
-    """
-    Accepts `{"url": "https://..."}` and returns a full CredibleX trust report.
-    """
-    url = (request.url or "").strip()
-    if not url:
-        raise HTTPException(400, detail={"error": "invalid_url", "message": "The 'url' field is required."})
-    if not (url.startswith("http://") or url.startswith("https://")):
-        raise HTTPException(400, detail={"error": "invalid_url",
-                                          "message": f"URL must start with http:// or https://. Got: '{url[:80]}'"})
+@app.post("/analyze-text")
+def analyze_text(request: AnalyzeRequest):
+    from inference import run_inference
+    t0 = time.time()
+    result = run_inference(request.text)
+    latency_ms = round((time.time() - t0) * 1000, 1)
+    result["latency_ms"] = latency_ms
 
-    _assert_model_exists()
+    words = request.text.split()
+    word_count = len(words)
+    metadata = {
+        "title":  "Pasted Text Analysis",
+        "author": "Unknown",
+        "date":   "Unknown"
+    }
+    text_metadata = {
+        "word_count":          word_count,
+        "estimated_read_time": f"{max(1, round(word_count / 200))} min read",
+        "contains_url":        any(w.startswith("http") for w in words),
+        "looks_like_forward":  any(kw in request.text.lower() for kw in ["forwarded", "forward this", "share this", "share karo"]),
+        "numeric_claims_count": sum(1 for w in words if any(c.isdigit() for c in w)),
+        "likely_non_english":  False
+    }
 
-    t_start = datetime.now(timezone.utc)
-    try:
-        raw = analyze_url(url)
-    except Exception as exc:
-        logger.error("analyze_url() raised for %s: %s", url, exc)
-        raise HTTPException(422, detail={"error": "scrape_failed", "message": str(exc), "url": url})
+    response = _shape_response(result, metadata)
+    response["text_metadata"] = text_metadata
+    response["input_chars"] = len(request.text)
 
-    if "error" in raw:
-        _append_log({"timestamp": datetime.now(timezone.utc).isoformat(), "url": url,
-                     "score": None, "verdict": "error",
-                     "elapsed_s": (datetime.now(timezone.utc) - t_start).total_seconds(),
-                     "error": raw["error"]})
-        raise HTTPException(422, detail={"error": "scrape_failed", "message": raw["error"], "url": url})
-
-    try:
-        report = generate_report(raw)
-    except Exception as exc:
-        raise HTTPException(500, detail={"error": "report_generation_failed", "message": str(exc)})
-
-    elapsed = (datetime.now(timezone.utc) - t_start).total_seconds()
     _append_log({
-        "timestamp":  datetime.now(timezone.utc).isoformat(),
-        "url":        url,
-        "score":      report["score"],
-        "verdict":    report["verdict"],
-        "elapsed_s":  round(elapsed, 2),
-        "factuality": report["dimensions"]["factuality"]["value"],
-        "bias":       report["dimensions"]["bias"]["value"],
-        "intent":     report["dimensions"]["intent"]["value"],
-        "emotion":    report["dimensions"]["emotion"]["value"],
+        "ts":           datetime.now(timezone.utc).isoformat(),
+        "endpoint":     "analyze-text",
+        "chars":        len(request.text),
+        "latency_ms":   latency_ms,
+        "bias_label":   result["bias"]["label"],
+        "fact_score":   result["factuality"]["score"],
+        "intent_label": result["intent"]["label"]
     })
-    return report
+    return response
 
+@app.post("/analyze-url")
+def analyze_url(request: AnalyzeURLRequest):
+    from scraper import extract_article
+    from inference import run_inference
 
-# ─────────────────────────────────────────────────────────────────────────────
-# POST /analyze-text   — raw text → model (WhatsApp / copy-paste)
-# ─────────────────────────────────────────────────────────────────────────────
-@app.post("/analyze-text", summary="Fact-check raw text (WhatsApp message, copied article)")
-def analyze_text_endpoint(request: TextRequest):
-    """
-    Accepts `{"text": "..."}` and returns a full CredibleX trust report.
-
-    Use this for:
-    • WhatsApp forwards / viral messages
-    • Copied article text
-    • Any news content without a URL
-
-    Minimum text length: 50 characters.
-    """
-    text = (request.text or "").strip()
-    if not text:
-        raise HTTPException(400, detail={"error": "invalid_text", "message": "The 'text' field is required."})
-    if len(text) < 50:
-        raise HTTPException(400, detail={
-            "error":   "text_too_short",
-            "message": f"Text must be at least 50 characters for meaningful analysis. Got {len(text)} chars.",
+    article = extract_article(request.url)
+    if article is None or article.get("text", "").strip() == "":
+        raise HTTPException(status_code=422, detail={
+            "message": "Could not extract article text from the provided URL. The site may block scrapers, require login, or have no readable content.",
+            "url": request.url
         })
 
-    _assert_model_exists()
+    t0 = time.time()
+    result = run_inference(article["text"])
+    latency_ms = round((time.time() - t0) * 1000, 1)
+    result["latency_ms"] = latency_ms
 
-    t_start = datetime.now(timezone.utc)
-    try:
-        raw = analyze_text(text)
-    except Exception as exc:
-        logger.error("analyze_text() raised: %s", exc)
-        raise HTTPException(422, detail={"error": "analysis_failed", "message": str(exc)})
+    metadata = {
+        "title":  article.get("title", "Unknown Article"),
+        "author": article.get("author", "Unknown"),
+        "date":   article.get("date", "Unknown")
+    }
 
-    if "error" in raw:
-        raise HTTPException(422, detail={"error": "analysis_failed", "message": raw["error"]})
+    response = _shape_response(result, metadata)
+    response["url"] = request.url
+    response["input_chars"] = len(article["text"])
 
-    try:
-        report = generate_report(raw)
-    except Exception as exc:
-        raise HTTPException(500, detail={"error": "report_generation_failed", "message": str(exc)})
-
-    elapsed = (datetime.now(timezone.utc) - t_start).total_seconds()
     _append_log({
-        "timestamp":  datetime.now(timezone.utc).isoformat(),
-        "url":        f"[TEXT] {text[:60]}…",
-        "score":      report["score"],
-        "verdict":    report["verdict"],
-        "elapsed_s":  round(elapsed, 2),
-        "factuality": report["dimensions"]["factuality"]["value"],
-        "bias":       report["dimensions"]["bias"]["value"],
-        "intent":     report["dimensions"]["intent"]["value"],
-        "emotion":    report["dimensions"]["emotion"]["value"],
+        "ts":           datetime.now(timezone.utc).isoformat(),
+        "endpoint":     "analyze-url",
+        "url":          request.url,
+        "chars":        len(article["text"]),
+        "latency_ms":   latency_ms,
+        "bias_label":   result["bias"]["label"],
+        "fact_score":   result["factuality"]["score"],
+        "intent_label": result["intent"]["label"]
     })
-    return report
+    return response
 
+@app.get("/logs")
+def get_logs():
+    try:
+        if not Path(LOG_PATH).exists():
+            return {"logs": [], "count": 0}
+        with open(LOG_PATH, "r") as f:
+            lines = f.readlines()
+        last_lines = lines[-100:]
+        parsed_logs = [json.loads(line) for line in last_lines if line.strip()]
+        return {"logs": parsed_logs, "count": len(parsed_logs)}
+    except Exception as e:
+        return {"logs": [], "count": 0, "error": str(e)}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GET /logs
-# ─────────────────────────────────────────────────────────────────────────────
-@app.get("/logs", summary="Return recent request log")
-def get_logs(limit: int = 50):
-    limit = max(1, min(limit, _MAX_LOG))
-    return {"count": min(limit, len(_request_log)), "entries": _request_log[-limit:]}
-
+@app.on_event("startup")
+async def startup():
+    from inference import _load_model_once
+    _load_model_once()
+    print("CredibleX V2 model loaded and ready.")
 
 if __name__ == "__main__":
-    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=False)
+    import uvicorn
+    uvicorn.run("api:app", host="0.0.0.0", port=7860, reload=False)

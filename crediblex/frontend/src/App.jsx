@@ -6,7 +6,7 @@ import BiasSlider from './components/BiasSlider';
 import { FactualityBar, IntentChip, EmotionChip } from './components/Badges';
 import History from './components/History';
 
-const API = 'http://127.0.0.1:8000';
+const API = 'http://localhost:7860';
 const MAX_HISTORY = 5;
 
 const TIER_COLOR = (score) => {
@@ -176,20 +176,28 @@ export default function App() {
 
   // ── Save a new result to history ──
   const saveToHistory = (report, type, value) => {
-    const entry = {
-      type,
-      value,
-      title: report.metadata?.title || (type === 'text' ? value.slice(0, 60) : value),
-      score: report.score,
-      verdict: report.verdict,
-      report,
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    };
-    setHistory(prev => {
-      const updated = [entry, ...prev].slice(0, MAX_HISTORY);
-      localStorage.setItem('crediblex_history', JSON.stringify(updated));
-      return updated;
-    });
+    try {
+      const entry = {
+        type,
+        value,
+        title: report.metadata?.title || (type === 'text' ? value.slice(0, 60) : value) || 'Analysis',
+        score: report.score ?? 0,
+        verdict: report.verdict || 'Unknown',
+        report,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      };
+      setHistory(prev => {
+        const updated = [entry, ...prev].slice(0, MAX_HISTORY);
+        try {
+          localStorage.setItem('crediblex_history', JSON.stringify(updated));
+        } catch (e) {
+          console.error('History save failed:', e);
+        }
+        return updated;
+      });
+    } catch (err) {
+      console.error('Error preparing history entry:', err);
+    }
   };
 
   // ── Clear history ──
@@ -212,7 +220,7 @@ export default function App() {
     setInputType(type);
 
     try {
-      const endpoint = type === 'url' ? `${API}/analyze` : `${API}/analyze-text`;
+      const endpoint = type === 'url' ? `${API}/analyze-url` : `${API}/analyze-text`;
       const body     = type === 'url' ? { url: value } : { text: value };
 
       const res  = await fetch(endpoint, {

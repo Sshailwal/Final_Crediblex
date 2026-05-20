@@ -1,0 +1,37 @@
+# ────────────────────────────────────────────────────────────────
+#  CredibleX v2 — Indian Fine-tune Config
+# ────────────────────────────────────────────────────────────────
+#  Consumed by src/train_indian.py and src/evaluate_indian.py.
+#  All paths are relative to the project root unless noted.
+# ────────────────────────────────────────────────────────────────
+
+# Backbone encoder (HuggingFace model hub id or local path)
+model_name: "xlm-roberta-base"
+
+# Training hyper-parameters
+epochs: 5
+batch_size: 16            # reduce to 8 if GPU VRAM < 8 GB
+lr_encoder: 5.0e-5        # learning rate for the frozen-then-unfrozen encoder
+lr_head: 2.0e-4           # learning rate for classification heads
+warmup_steps: 100
+
+# Sequence length (tokens). XLM-R supports up to 512.
+max_len: 256
+
+# Device — "cuda", "cpu", or "auto" (resolved at runtime)
+device: "auto"
+
+# Paths (relative to project root)
+train_csv: "data/train.csv"
+val_csv:   "data/val.csv"
+test_csv:  "data/test.csv"
+checkpoint_dir: "checkpoints"
+checkpoint_name: "model_v2_indian.pth"
+
+# LoRA settings (mirrored in src/model.py — kept here for reference)
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.1
+lora_target_modules:
+  - "query"
+  - "value"

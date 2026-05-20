@@ -1,0 +1,200 @@
+======================================================================
+  BIAS CLASSIFIER v2 -- TRAINING PIPELINE
+======================================================================
+
+[2026-05-19 23:06:05] --- BLOCK 1: FILE SYSTEM ---
+[2026-05-19 23:06:05] PASS [FS-01] -- train_v2.csv exists
+[2026-05-19 23:06:05] PASS [FS-02] -- val_v2.csv exists
+[2026-05-19 23:06:05] PASS [FS-03] -- test_v2.csv exists
+[2026-05-19 23:06:05] PASS [FS-04] -- metadata.json parsed
+[2026-05-19 23:06:05] PASS [FS-05] -- metadata row counts match splits
+
+[2026-05-19 23:06:05] --- BLOCK 2: SCHEMA ---
+[2026-05-19 23:06:05] PASS [SC-01] -- all splits share identical column order
+[2026-05-19 23:06:05] PASS [SC-02] -- bias_label is int64 in all splits
+[2026-05-19 23:06:05] PASS [SC-03] -- source column present in all splits
+[2026-05-19 23:06:05] PASS [SC-04] -- source values are valid: {'smote_synthetic', 'indian_dataset', 'global_backup'}
+
+[2026-05-19 23:06:05] --- BLOCK 3: DATASET INTEGRITY ---
+[2026-05-19 23:06:05] PASS [DI-01] -- zero null text values
+[2026-05-19 23:06:05] PASS [DI-02] -- zero null bias_label values
+[2026-05-19 23:06:05] PASS [DI-03] -- all bias_label values within {0,1,2,3,4}
+[2026-05-19 23:06:05] PASS [DI-04] -- zero empty text strings
+[2026-05-19 23:06:05] PASS [DI-05] -- zero texts shorter than 20 chars
+[2026-05-19 23:06:05] PASS [DI-06] -- zero duplicate texts in train set
+[2026-05-19 23:06:05] PASS [DI-07] -- metadata total 40730 matches actual 40730
+
+[2026-05-19 23:06:05] --- BLOCK 4: CLASS BALANCE ---
+[2026-05-19 23:06:05] PASS [CB-01] -- train contains all 5 classes
+[2026-05-19 23:06:05] PASS [CB-02] -- train balanced (max_diff=1)
+[2026-05-19 23:06:05] PASS [CB-03] -- val contains all 5 classes
+[2026-05-19 23:06:05] PASS [CB-04] -- test contains all 5 classes
+[2026-05-19 23:06:05] PASS [CB-05] -- train split ratio 0.8000 (expected ~0.80 ±0.005)
+[2026-05-19 23:06:05] PASS [CB-06] -- val split ratio 0.1000 (expected ~0.10 ±0.005)
+[2026-05-19 23:06:05] PASS [CB-07] -- test split ratio 0.1000 (expected ~0.10 ±0.005)
+
+[2026-05-19 23:06:05] --- BLOCK 5: DATA LEAKAGE ---
+[2026-05-19 23:06:05] PASS [DL-01] -- zero train/val text overlap
+[2026-05-19 23:06:05] PASS [DL-02] -- zero train/test text overlap
+[2026-05-19 23:06:05] PASS [DL-03] -- zero val/test text overlap
+
+================================================================
+  PHASE 2 -- PRE-TRAINING AUDIT REPORT
+================================================================
+  FILE SYSTEM         : 5 / 5 passed
+  SCHEMA              : 4 / 4 passed
+  DATASET INTEGRITY   : 7 / 7 passed
+  CLASS BALANCE       : 7 / 7 passed
+  DATA LEAKAGE        : 3 / 3 passed
+----------------------------------------------------------------
+  TOTAL                          : 26 / 26 passed
+  FAILED CHECKS                  : NONE
+----------------------------------------------------------------
+  VERDICT : ALL CHECKS PASSED -- SAFE TO PROCEED TO PHASE 3
+================================================================
+
+[2026-05-19 23:06:05] OK  Audit passed -- proceeding to model training
+[2026-05-19 23:06:05] OK  Loading dataset splits ...
+[2026-05-19 23:06:06] OK  Fitting TF-IDF vectorizer on train set only ...
+[2026-05-19 23:06:19] OK  X_train shape: (32584, 10000)
+[2026-05-19 23:06:19] OK  X_val   shape: (4073, 10000)
+[2026-05-19 23:06:19] OK  X_test  shape: (4073, 10000)
+[2026-05-19 23:06:19] OK  Vectorizer saved -> models/bias_classifier_v2/tfidf_vectorizer.pkl
+[2026-05-19 23:06:19] OK  Starting baseline model sweep ...
+[2026-05-19 23:06:19] OK  Training LogisticRegression ...
+  +---------------------------------------------+
+  | Model          : LogisticRegression        |
+  | Val Accuracy   : 0.8942                    |
+  | Val Macro F1   : 0.8937                    |
+  | Val Weighted F1: 0.8938                    |
+  | Per-class F1:                              |
+  |   Far Left     (0): 0.9428              |
+  |   Left         (1): 0.8791              |
+  |   Center       (2): 0.8254              |
+  |   Right        (3): 0.8587              |
+  |   Far Right    (4): 0.9628              |
+  +---------------------------------------------+
+
+[2026-05-19 23:06:22] OK  Training LinearSVC (Calibrated) ...
+  +---------------------------------------------+
+  | Model          : LinearSVC (Calibrated)    |
+  | Val Accuracy   : 0.9126                    |
+  | Val Macro F1   : 0.9122                    |
+  | Val Weighted F1: 0.9122                    |
+  | Per-class F1:                              |
+  |   Far Left     (0): 0.9733              |
+  |   Left         (1): 0.9029              |
+  |   Center       (2): 0.8380              |
+  |   Right        (3): 0.8620              |
+  |   Far Right    (4): 0.9847              |
+  +---------------------------------------------+
+
+[2026-05-19 23:06:51] OK  Training MultinomialNB ...
+  +---------------------------------------------+
+  | Model          : MultinomialNB             |
+  | Val Accuracy   : 0.7356                    |
+  | Val Macro F1   : 0.7344                    |
+  | Val Weighted F1: 0.7344                    |
+  | Per-class F1:                              |
+  |   Far Left     (0): 0.7671              |
+  |   Left         (1): 0.7145              |
+  |   Center       (2): 0.7116              |
+  |   Right        (3): 0.7331              |
+  |   Far Right    (4): 0.7458              |
+  +---------------------------------------------+
+
+
+  Rank  Model                                  Val Acc   Macro F1  Weighted F1
+  --------------------------------------------------------------------------
+  1     LinearSVC (Calibrated)                  0.9126     0.9122       0.9122
+  2     LogisticRegression                      0.8942     0.8937       0.8938
+  3     MultinomialNB                           0.7356     0.7344       0.7344
+
+[2026-05-19 23:06:51] OK  Best baseline: LinearSVC (Calibrated) -- Val Macro F1: 0.9122
+[2026-05-19 23:06:51] OK  Evaluating best model (LinearSVC (Calibrated)) on test set ...
+
+  === Test Set Classification Report ===
+              precision    recall  f1-score   support
+
+    Far Left       0.97      1.00      0.98       815
+        Left       0.95      0.91      0.93       814
+      Center       0.89      0.86      0.88       815
+       Right       0.87      0.91      0.89       815
+   Far Right       0.99      0.99      0.99       814
+
+    accuracy                           0.93      4073
+   macro avg       0.93      0.93      0.93      4073
+weighted avg       0.93      0.93      0.93      4073
+
+[2026-05-19 23:06:51] OK  Confusion matrix saved -> logs/confusion_matrix_test.png
+[2026-05-19 23:06:51] OK  Hyperparameter tuning: LinearSVC (Calibrated) -- RandomizedSearchCV (n_iter=20, cv=5) ...
+[2026-05-19 23:16:08] OK  Best params: {'estimator__C': 1}
+
+  Val Macro F1  : baseline 0.9122 -> tuned 0.9122 (D +0.0000)
+  Test Macro F1 : baseline 0.9333 -> tuned 0.9333 (D +0.0000)
+
+[2026-05-19 23:16:09] WRN Tuned model does NOT improve over baseline -- keeping baseline
+[2026-05-19 23:16:09] OK  Model saved -> models/bias_classifier_v2/best_model.pkl
+[2026-05-19 23:16:09] OK  Label encoder saved -> models/bias_classifier_v2/label_encoder.pkl
+[2026-05-19 23:16:09] OK  Model card saved -> models/bias_classifier_v2/model_card.json
+[2026-05-19 23:16:09] OK  Reloading model and vectorizer from disk for sanity check ...
+  Text     : The billionaire class is destroying democracy and workers mu...
+  Expected : Far Left
+  Got      : Center
+  Result   : WRONG
+
+  Text     : Progressive tax reform and expanded public healthcare are ur...
+  Expected : Left
+  Got      : Center
+  Result   : WRONG
+
+  Text     : The committee reviewed both proposals before issuing a bipar...
+  Expected : Center
+  Got      : Center
+  Result   : CORRECT
+
+  Text     : Lower taxes and reduced government intervention will drive e...
+  Expected : Right
+  Got      : Center
+  Result   : WRONG
+
+  Text     : The radical left is dismantling national identity and open b...
+  Expected : Far Right
+  Got      : Center
+  Result   : WRONG
+
+[2026-05-19 23:16:09] WRN Sanity check WARNING -- 1/5 correct (model may still be valid, flagged for review)
+
+==================================================================
+  BIAS CLASSIFIER v2 -- TRAINING PIPELINE SUMMARY
+==================================================================
+  AUDIT GATE       : PASSED (26/26 checks)
+  ----------------------------------------------------------------
+  FEATURE ENGINEERING
+    Vectorizer     : TF-IDF (10000 features, ngram 1-2)
+    Train shape    : (32584, 10000)
+  ----------------------------------------------------------------
+  BASELINE MODEL SWEEP
+    Models evaluated : 3
+    Best baseline    : LinearSVC (Calibrated) (Macro F1: 0.9122)
+  ----------------------------------------------------------------
+  HYPERPARAMETER TUNING
+    Tuning applied : No
+    Val Macro F1 delta : D +0.0000
+  ----------------------------------------------------------------
+  FINAL MODEL -- TEST SET RESULTS
+    Model          : LinearSVC (Calibrated)
+    Accuracy       : 0.9335
+    Macro F1       : 0.9333
+    Weighted F1    : 0.9333
+    Per-class F1:
+      Far Left     (0) : 0.9824
+      Left         (1) : 0.9291
+      Center       (2) : 0.8770
+      Right        (3) : 0.8874
+      Far Right    (4) : 0.9908
+  ----------------------------------------------------------------
+  ARTIFACTS SAVED TO : models/bias_classifier_v2/
+  SANITY CHECK     : WARN (1/5)
+==================================================================
+

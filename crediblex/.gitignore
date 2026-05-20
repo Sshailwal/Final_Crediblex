@@ -3,9 +3,12 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.pth
+
+# Environment / secrets
+.env
 
 # Virtual Environments
-.env
 venv/
 env/
 
@@ -45,3 +48,9 @@ tempCodeRunnerFile.py
 # Task/temp artifacts
 task_report.txt
 eval_predictions.csv
+
+# v2 evaluation outputs
+confusion_matrix_indian.png
+
+# Scratch inspection scripts
+inspect_csv.py

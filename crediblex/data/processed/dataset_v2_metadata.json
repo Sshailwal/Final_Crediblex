@@ -1,0 +1,30 @@
+{
+  "created_at": "2026-05-19T17:21:46.408973+00:00",
+  "random_state": 42,
+  "target_samples_per_class": 8146,
+  "total_samples": 40730,
+  "train_samples": 32584,
+  "val_samples": 4073,
+  "test_samples": 4073,
+  "class_distribution": {
+    "0": 8146,
+    "1": 8146,
+    "2": 8146,
+    "3": 8146,
+    "4": 8146
+  },
+  "source_breakdown": {
+    "global_backup": 20147,
+    "indian_dataset": 738,
+    "smote_synthetic": 19845
+  },
+  "columns_padded": [
+    "fact_score",
+    "intent_label",
+    "emotion_label",
+    "region"
+  ],
+  "label_remapping_applied": false,
+  "cross_dedup_rows_dropped": 0,
+  "text_cleaning_rows_dropped": 131
+}

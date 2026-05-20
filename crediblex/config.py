@@ -1,56 +1,32 @@
-import torch
-import os
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Training Hyperparameters - BALANCED MODE (RTX 4050 6GB)
-# ─────────────────────────────────────────────────────────────────────────────
-BATCH_SIZE        = 2       # 2 articles at a time — better GPU utilization
-MAX_LEN           = 192     # 192 tokens — more context than safe mode
-GRAD_ACCUM_STEPS  = 16      # effective batch = 2×16 = 32 (consistent with safe mode)
-EPOCHS            = 3       # Fine-tune run from epoch_5.pth — emotion pos_weight + HuberLoss
-LEARNING_RATE     = 5e-5
-WARMUP_RATIO      = 0.10
-SLIDING_STRIDE    = 96      # stride for sliding window (= MAX_LEN // 2)
-FREEZE_LAYERS     = 4       # freeze bottom 4 layers (was 6) — unfreezing 2 more
-
-DROPOUT           = 0.1
-GRAD_CLIP         = 1.0
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Model Architecture
-# ─────────────────────────────────────────────────────────────────────────────
+# --- Model ---
 MODEL_NAME = "microsoft/deberta-v3-base"
+MAX_LEN = 96              # token limit per window (VRAM constraint reduced from 128)
+STRIDE = 48               # sliding window stride
+MAX_WINDOWS = 5           # hard cap on windows per article (OOM guard)
 
-# Memory Optimizations
-GRADIENT_CHECKPOINTING = True   # keeps activation memory low
-USE_8BIT_ADAM          = False  # set True if bitsandbytes is installed
+# --- Device ---
+import torch
+DEVICE = torch.device("cpu")
 
-N_BIAS_CLASSES    = 3   # Left=0, Center=1, Right=2 (3-class balanced scheme)
-N_EMOTION_CLASSES = 7   # 7 Ekman classes
+# --- Paths ---
+SAVE_PATH = "model_v1.pth"
+LOG_PATH   = "logs/requests.jsonl"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Multi-Task Loss Weights
-# ─────────────────────────────────────────────────────────────────────────────
-BIAS_LOSS_WEIGHT    = 2.0
-FACT_LOSS_WEIGHT    = 1.0     # note: user specified 1.0 in prompt, was 10.0 before
-EMOTION_LOSS_WEIGHT = 1.5
+# --- Training (VRAM safe-mode) ---
+BATCH_SIZE  = 1
+GRAD_ACCUM  = 32          # effective batch = 32
+EPOCHS      = 5
+LR          = 2e-5
+WARMUP_RATIO = 0.1
+FREEZE_LAYERS = 9         # freeze more layers (9 of 12) to reduce optimizer VRAM footprint
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Checkpoint / Paths
-# ─────────────────────────────────────────────────────────────────────────────
-MID_EPOCH_CKPT_FREQ = 500
-SAVE_PATH           = "rediblex_v1.pth"
-CHECKPOINT_DIR      = os.path.join(os.environ.get("TEMP", "C:\\Temp"), "crediblex_checkpoints")
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+# --- Head output sizes (source of truth for ALL files) ---
+NUM_BIAS_LABELS      = 5   # 0=slightly_left 1=left 2=center 3=right 4=slightly_right
+NUM_FACT_LABELS      = 1   # regression scalar, float 0.0–1.0
+NUM_INTENT_LABELS    = 3   # 0=news 1=opinion 2=satire
+NUM_EMOTION_LABELS   = 28  # GoEmotions 28-class multi-label
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Safety & Device
-# ─────────────────────────────────────────────────────────────────────────────
-VRAM_SAFETY_THRESHOLD_GB = 5.0  # Tighter threshold for Ollama coexistence
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-if __name__ == "__main__":
-    print("Balanced Mode Active | Device: {}".format(DEVICE))
-    if DEVICE.type == "cuda":
-        print("GPU   : {}".format(torch.cuda.get_device_name(0)))
-        print("VRAM  : {:.1f} GB total".format(torch.cuda.get_device_properties(0).total_memory / 1e9))
+# --- Bias class weights (tensor, for CrossEntropyLoss) ---
+# Extreme classes (0,4) are minority — upweight to fix 16:1 imbalance
+import torch as _t
+BIAS_CLASS_WEIGHTS = _t.tensor([2.5, 1.2, 0.7, 1.2, 2.5], dtype=torch.float32)

@@ -16,20 +16,23 @@ class ArticleRecord(BaseModel):
     @field_validator('fact_score')
     @classmethod
     def check_fact_range(cls, v):
+        if v == -1.0: return v
         if not (0.0 <= v <= 1.0):
-            raise ValueError("Fact score must be between 0 and 1")
+            raise ValueError("Fact score must be between 0 and 1 (or -1.0 sentinel)")
         return v
 
     @field_validator('bias_label')
     @classmethod
     def check_bias_range(cls, v):
+        if v == -1: return v
         if not (0 <= v <= 4):
-            raise ValueError("Bias label must be between 0 and 4")
+            raise ValueError("Bias label must be between 0 and 4 (or -1 sentinel)")
         return v
 
     @field_validator('intent_label')
     @classmethod
     def check_intent_range(cls, v):
+        if v == -1: return v
         if not (0 <= v <= 2):
-            raise ValueError("Intent label must be between 0 and 2")
+            raise ValueError("Intent label must be between 0 and 2 (or -1 sentinel)")
         return v
