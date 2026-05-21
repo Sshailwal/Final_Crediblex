@@ -1,3 +1,4 @@
+import math
 import pickle
 import re
 from pathlib import Path
@@ -252,43 +253,54 @@ def run_inference(text: str) -> dict:
     }
 
 def _calculate_credibility(fact_score, bias_data, intent_data, top_emotions):
-    # Base Score from calibrated factuality (0.0 - 1.0 rescaled)
-    score = fact_score * 100.0
+    # Factuality (0-60 pts): sigmoid reduces overconfidence at the extremes.
+    factuality_component = 60 * (1 / (1 + math.exp(-10 * (fact_score - 0.5))))
 
-    # Bias modifier (reward center, penalize extremes)
-    if bias_data["label"] == "center":
-        score += 10
-    elif bias_data["label"] in ["left", "right"]:
-        score -= 5
-    elif bias_data["label"] in ["slightly_left", "slightly_right"]:
-        score -= 2
+    # Bias extremity (0-25 pts): direction does not matter, distance from center does.
+    bias_component = {
+        "center": 25,
+        "slightly_left": 21,
+        "slightly_right": 21,
+        "left": 13,
+        "right": 13,
+        "far_left": 4,
+        "far_right": 4,
+    }.get(bias_data["label"], 12)
 
-    # Intent modifier (reward news, penalize satire/opinion)
-    if intent_data["label"] == "news":
-        score += 10
-    elif intent_data["label"] == "opinion":
-        score -= 10
-    elif intent_data["label"] == "satire":
-        score -= 30
-
-    # Emotion modifier (penalize heavy negative emotional framing)
+    # Emotional manipulation (0-15 pts): penalize negative emotional dominance.
     negative_emotions = ["anger", "annoyance", "disappointment", "disapproval",
                          "disgust", "embarrassment", "fear", "grief", "nervousness",
                          "remorse", "sadness"]
-    negative_penalty = sum([8 for e in top_emotions if e["label"] in negative_emotions])
-    score -= negative_penalty
+    total_emotions = len(top_emotions)
+    number_of_negative_top_emotions = sum(
+        1 for emotion in top_emotions if emotion["label"] in negative_emotions
+    )
 
-    # Bound before applying hard penalty
-    score = max(0.0, min(100.0, score))
+    if total_emotions == 0:
+        emotion_component = 10
+    elif total_emotions < 3:
+        emotion_component = 12
+    else:
+        ratio = number_of_negative_top_emotions / total_emotions
+        emotion_component = 15 * (1 - ratio)
 
-    # Polite Fake News Penalty:
-    # Only trigger if calibrated factuality is below 0.35
-    # (previously 0.5 caused ALL articles to be halved since raw scores
-    # never exceeded 0.45 due to regression-to-mean)
-    if fact_score < 0.35:
-        score *= 0.6
+    # Intent scales content signals only, leaving bias independent.
+    intent_multiplier = {
+        "news": 1.00,
+        "analysis": 0.95,
+        "opinion": 0.85,
+        "satire": 0.65,
+    }.get(intent_data["label"], 0.80)
 
-    return int(max(0, min(100, score)))
+    content_score = (factuality_component + emotion_component) * intent_multiplier
+    raw_score = content_score + bias_component
+
+    # Hard floor for extremely low factuality.
+    if fact_score < 0.25:
+        raw_score = min(raw_score, 18)
+
+    max_possible = (60 + 15) * 1.00 + 25
+    return round(max(0, min(100, (raw_score / max_possible) * 100)), 1)
 
 
 def _run_classical_inference(text: str, loaded: dict) -> dict:

@@ -7,7 +7,7 @@ import { FactualityBar, IntentChip, EmotionChip } from "./components/Badges";
 import History from "./components/History";
 import Navbar from "./components/Navbar";
 
-const API = "http://127.0.0.1:7860";
+const API = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:7860';
 const MAX_HISTORY = 5;
 
 const TIER_COLOR = (score) => {
@@ -192,6 +192,133 @@ function TextMetaCard({ meta }) {
   );
 }
 
+const safeNumber = (value, fallback = 0) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const formatPercent = (value) => `${Math.round(safeNumber(value) * 100)}%`;
+
+function DashboardCard({ className = "", eyebrow, title, value, children }) {
+  return (
+    <section className={`result-card ${className}`}>
+      <div className="result-card-header">
+        <span className="result-card-eyebrow">{eyebrow}</span>
+        <h3>{title}</h3>
+      </div>
+      {value && <div className="result-card-value">{value}</div>}
+      {children}
+    </section>
+  );
+}
+
+function ReportDashboard({ report, inputType }) {
+  const dimensions = report?.dimensions || {};
+  const factuality = dimensions.factuality || {};
+  const bias = dimensions.bias || {};
+  const intent = dimensions.intent || {};
+  const emotion = dimensions.emotion || {};
+  const metadata = report?.metadata || {};
+  const score = safeNumber(report?.score);
+  const tierColor = TIER_COLOR(score);
+  const title =
+    metadata.title || (inputType === "text" ? "Message Analysis" : "Article Analysis");
+  const author = metadata.author && metadata.author !== "Unknown" ? metadata.author : "";
+  const date = metadata.date && metadata.date !== "Unknown" ? metadata.date : "";
+  const emotionValue = emotion.value || emotion.top?.[0]?.label || "Neutral";
+
+  return (
+    <div className="result-dashboard">
+      <section className="result-overview">
+        {inputType === "text" && (
+          <div className="whatsapp-badge">💬 WhatsApp / Text Analysis</div>
+        )}
+        <div>
+          <span className="result-kicker">Credibility Report</span>
+          <h2>{title}</h2>
+        </div>
+        {(author || date) && (
+          <div className="result-meta-row">
+            {author && (
+              <span>
+                Author <strong>{author}</strong>
+              </span>
+            )}
+            {date && (
+              <span>
+                Date <strong>{date}</strong>
+              </span>
+            )}
+          </div>
+        )}
+        {report.extraction_warning && (
+          <div className="extraction-warning">{report.extraction_warning}</div>
+        )}
+      </section>
+
+      <div className="result-grid">
+        <DashboardCard
+          className="trust-card"
+          eyebrow="Major score"
+          title="Trust / Credibility"
+        >
+          <TrustGauge score={score} />
+          <div className="verdict-pill" style={{ color: tierColor }}>
+            {report?.verdict || "Unknown verdict"}
+          </div>
+        </DashboardCard>
+
+        <DashboardCard
+          eyebrow="Factuality"
+          title="Factuality Percentage"
+          value={formatPercent(factuality.value)}
+        >
+          <FactualityBar value={safeNumber(factuality.value)} />
+          <p>{factuality.explanation || "No factuality explanation was returned."}</p>
+        </DashboardCard>
+
+        <DashboardCard
+          className="bias-card"
+          eyebrow="Political leaning"
+          title="Political Bias"
+        >
+          <BiasSlider biasObj={bias} />
+          <p>
+            {bias.explanation ||
+              "No political bias explanation was returned by the backend."}
+          </p>
+        </DashboardCard>
+
+        <DashboardCard
+          eyebrow="Classification"
+          title="Intent"
+          value={intent.value || "Unknown"}
+        >
+          <IntentChip intent={intent.value || "Unknown"} />
+          <p>{intent.explanation || "No intent explanation was returned."}</p>
+        </DashboardCard>
+
+        <DashboardCard
+          eyebrow="Tone"
+          title="Emotion"
+          value={emotionValue}
+        >
+          <EmotionChip emotion={emotionValue} />
+          <p>{emotion.explanation || "No dominant emotion was returned."}</p>
+        </DashboardCard>
+
+        <DashboardCard
+          className="summary-card"
+          eyebrow="Article summary"
+          title="Summary"
+        >
+          <p className="summary-text">{report?.summary || "No summary available."}</p>
+        </DashboardCard>
+      </div>
+    </div>
+  );
+}
+
 export default function Page() {
   const [state, setState] = useState("idle");
   const [report, setReport] = useState(null);
@@ -289,8 +416,6 @@ export default function Page() {
     }
   };
 
-  const tierColor = report ? TIER_COLOR(report.score) : "#6c63ff";
-  const dim = report?.dimensions || {};
   const isText = inputType === "text";
 
   return (
@@ -424,297 +549,12 @@ export default function Page() {
                   gap: "24px",
                 }}
               >
-                {/* Metadata */}
-                <div
-                  className="report-meta"
-                  style={{
-                    padding: "28px",
-                    borderRadius: "20px",
-                  }}
-                >
-                  {isText && (
-                    <div className="whatsapp-badge">
-                      💬 WhatsApp / Text Analysis
-                    </div>
-                  )}
-
-                  <h2
-                    style={{
-                      marginTop: "12px",
-                      marginBottom: "18px",
-                    }}
-                  >
-                    {report.metadata?.title ||
-                      (isText ? "Message Analysis" : "Article")}
-                  </h2>
-
-                  <div
-                    className="meta-row"
-                    style={{
-                      display: "flex",
-                      gap: "16px",
-                      flexWrap: "wrap",
-                      marginBottom: "16px",
-                    }}
-                  >
-                    {report.metadata?.author &&
-                      report.metadata.author !== "Unknown" &&
-                      !report.metadata.author.includes("WhatsApp") && (
-                        <div className="meta-item">
-                          Author
-                          <span>{report.metadata.author}</span>
-                        </div>
-                      )}
-
-                    {report.metadata?.date &&
-                      report.metadata.date !== "Unknown" && (
-                        <div className="meta-item">
-                          Date
-                          <span>{report.metadata.date}</span>
-                        </div>
-                      )}
-                  </div>
-
-                  <p
-                    className="report-summary"
-                    style={{
-                      lineHeight: 1.8,
-                    }}
-                  >
-                    {report.summary}
-                  </p>
-                </div>
-
-                {/* Copy Button */}
+                <ReportDashboard report={report} inputType={inputType} />
                 <CopyReportButton report={report} inputType={inputType} />
-
-                {/* WhatsApp Card */}
                 {isText && <TextMetaCard meta={report.text_metadata} />}
-
-                {/* Findings */}
                 <KeyFindings findings={report.key_findings} />
-
-                {/* Score */}
-                <div
-                  className="score-section"
-                  style={{
-                    textAlign: "center",
-                    padding: "32px 20px",
-                  }}
-                >
-                  <p
-                    style={{
-                      fontSize: ".72rem",
-                      letterSpacing: ".1em",
-                      textTransform: "uppercase",
-                      color: "#9ca3af",
-                      marginBottom: 8,
-                    }}
-                  >
-                    Trust Score
-                  </p>
-
-                  <TrustGauge score={report.score} />
-
-                  <div
-                    className="verdict-label"
-                    style={{
-                      color: tierColor,
-                      marginTop: "16px",
-                    }}
-                  >
-                    {report.verdict}
-                  </div>
-                </div>
-
-                {/* Dimensions */}
-                <div
-                  className="dimensions"
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
-                    gap: "20px",
-                    alignItems: "stretch",
-                  }}
-                >
-                  {/* CARD */}
-                  {[
-                    {
-                      label: "Factuality",
-                      value: `${Math.round(
-                        (dim.factuality?.value ?? 0) * 100,
-                      )}%`,
-                      explanation: dim.factuality?.explanation,
-                      component: (
-                        <FactualityBar value={dim.factuality?.value ?? 0.5} />
-                      ),
-                      weight: dim.factuality?.weight,
-                    },
-                    {
-                      label: "Political Bias",
-                      value: dim.bias?.value,
-                      explanation: dim.bias?.explanation,
-                      component: <BiasSlider biasObj={dim.bias} />,
-                      weight: dim.bias?.weight,
-                    },
-                    {
-                      label: "Intent",
-                      value: dim.intent?.value,
-                      explanation: dim.intent?.explanation,
-                      component: <IntentChip intent={dim.intent?.value} />,
-                      weight: dim.intent?.weight,
-                    },
-                    {
-                      label: "Emotion",
-                      value: dim.emotion?.value,
-                      explanation: dim.emotion?.explanation,
-                      component: <EmotionChip emotion={dim.emotion?.value} />,
-                      weight: dim.emotion?.weight,
-                    },
-                  ].map((item, idx) => (
-                    <div
-                      key={idx}
-                      className="dim-card"
-                      style={{
-                        padding: "24px",
-                        borderRadius: "18px",
-                        display: "flex",
-                        flexDirection: "column",
-                        justifyContent: "space-between",
-                        minHeight: "260px",
-                      }}
-                    >
-                      <div className="dim-header">
-                        <span className="dim-label">{item.label}</span>
-                        <span className="dim-weight">{item.weight}</span>
-                      </div>
-
-                      <div
-                        className="dim-value"
-                        style={{
-                          margin: "14px 0",
-                        }}
-                      >
-                        {item.value}
-                      </div>
-
-                      {item.component}
-
-                      <p
-                        className="dim-explanation"
-                        style={{
-                          marginTop: "16px",
-                          lineHeight: 1.7,
-                        }}
-                      >
-                        {item.explanation}
-                      </p>
-                    </div>
-                  ))}
-                </div>
               </div>
             )}
-
-            {/* Feature Cards */}
-           {state === "idle" && (
-  <div
-    style={{
-      marginTop: "70px",
-      marginBottom: "70px",
-      width: "100%",
-    }}
-  >
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
-        gap: "24px",
-        alignItems: "stretch",
-      }}
-    >
-      {[
-        {
-          icon: "📊",
-          title: "Comprehensive Analysis",
-          desc: "Get detailed insights on factuality, bias, intent, and emotion.",
-        },
-        {
-          icon: "⚡",
-          title: "Instant Results",
-          desc: "Get analysis in seconds, not hours. Powered by advanced AI.",
-        },
-        {
-          icon: "📈",
-          title: "Track History",
-          desc: "Keep a record of all your analyses for future reference.",
-        },
-      ].map((card, idx) => (
-        <div
-          key={idx}
-          style={{
-            background: "#ffffff",
-            border: "1px solid #e5e7eb",
-            borderRadius: "18px",
-            padding: "34px 28px",
-            textAlign: "center",
-            minHeight: "220px",
-
-            display: "flex",
-            flexDirection: "column",
-            justifyContent: "center",
-            alignItems: "center",
-
-            boxShadow: "0 2px 10px rgba(0,0,0,0.04)",
-            transition: "all 0.25s ease",
-            cursor: "default",
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.transform = "translateY(-4px)";
-            e.currentTarget.style.boxShadow =
-              "0 8px 24px rgba(0,0,0,0.08)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.transform = "translateY(0px)";
-            e.currentTarget.style.boxShadow =
-              "0 2px 10px rgba(0,0,0,0.04)";
-          }}
-        >
-          <div
-            style={{
-              fontSize: "2.8rem",
-              marginBottom: "18px",
-              lineHeight: 1,
-            }}
-          >
-            {card.icon}
-          </div>
-
-          <h3
-            style={{
-              fontSize: "1.2rem",
-              fontWeight: "700",
-              color: "#111827",
-              marginBottom: "12px",
-            }}
-          >
-            {card.title}
-          </h3>
-
-          <p
-            style={{
-              fontSize: ".95rem",
-              color: "#6b7280",
-              lineHeight: 1.7,
-              maxWidth: "260px",
-            }}
-          >
-            {card.desc}
-          </p>
-        </div>
-      ))}
-    </div>
-  </div>
-)}
           </div>
         </main>
         {/* Footer */}

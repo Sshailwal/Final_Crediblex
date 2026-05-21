@@ -41,6 +41,27 @@ INTENT_LABEL_MAP = {
     "satire":  "Satire",
 }
 
+def _bias_explanation(label: str, display: str, confidence: float) -> str:
+    confidence_pct = round(confidence * 100)
+
+    if label == "center":
+        return (
+            f"No strong political bias detected. The article appears broadly balanced "
+            f"or centrist with {confidence_pct}% confidence."
+        )
+
+    if label in ["slightly_left", "slightly_right"]:
+        return (
+            f"A mild {display.lower()} political lean was observed with "
+            f"{confidence_pct}% confidence. This does not mean the article is fake "
+            "or fully biased."
+        )
+
+    return (
+        f"A strong {display.lower()} political lean was observed with "
+        f"{confidence_pct}% confidence based on wording and framing."
+    )
+
 def _shape_response(result: dict, metadata: dict = None) -> dict:
     """
     Converts the V2 inference output into the nested schema the frontend expects.
@@ -57,6 +78,7 @@ def _shape_response(result: dict, metadata: dict = None) -> dict:
     bias_display   = BIAS_LABEL_MAP.get(bias_raw, bias_raw.title())
     intent_display = INTENT_LABEL_MAP.get(intent_raw, intent_raw.title())
     emotion_display = top_emotions[0]["label"].title() if top_emotions else "Neutral"
+    bias_explanation = _bias_explanation(bias_raw, bias_display, bias_conf)
 
     # ── Key Findings ──────────────────────────────────────────────────────────
     findings = []
@@ -69,11 +91,11 @@ def _shape_response(result: dict, metadata: dict = None) -> dict:
         findings.append({"type": "bad", "icon": "🚨", "text": f"Low factuality score ({round(fact_score*100)}%). Content may contain misinformation."})
 
     if bias_raw == "center":
-        findings.append({"type": "good", "icon": "⚖️", "text": "Political bias is centrist — balanced reporting detected."})
+        findings.append({"type": "good", "icon": "⚖️", "text": "No strong political bias detected; reporting appears broadly balanced or centrist."})
     elif bias_raw in ["slightly_left", "slightly_right"]:
-        findings.append({"type": "warn", "icon": "📰", "text": f"Mild political lean detected: {bias_display} (confidence: {round(bias_conf*100)}%)."})
+        findings.append({"type": "warn", "icon": "📰", "text": f"Mild political lean observed: {bias_display} (confidence: {round(bias_conf*100)}%)."})
     else:
-        findings.append({"type": "bad", "icon": "📢", "text": f"Strong political bias detected: {bias_display} (confidence: {round(bias_conf*100)}%)."})
+        findings.append({"type": "bad", "icon": "📢", "text": f"Strong political lean observed: {bias_display} (confidence: {round(bias_conf*100)}%)."})
 
     if intent_raw == "satire":
         findings.append({"type": "warn", "icon": "🎭", "text": "Content is identified as satire — not intended as factual reporting."})
@@ -91,7 +113,8 @@ def _shape_response(result: dict, metadata: dict = None) -> dict:
     summary = (
         f"This content received a Trust Score of {result['trust_score']}/100 — classified as '{verdict}'. "
         f"Factuality is {fact_label.replace('_', ' ')} at {round(fact_score*100)}%. "
-        f"The political framing is {bias_display} and the intent is classified as {intent_display}. "
+        f"{bias_explanation} "
+        f"The intent is classified as {intent_display}. "
         f"{'Emotional framing is present: ' + emotion_display + '.' if top_emotions else 'No strong emotional framing detected.'}"
     )
 
@@ -112,7 +135,7 @@ def _shape_response(result: dict, metadata: dict = None) -> dict:
                 "confidence":   bias_conf,
                 "distribution": result["bias"].get("distribution", {}),
                 "weight":       "20%",
-                "explanation":  f"Detected a {bias_display} leaning with {round(bias_conf*100)}% confidence based on word choice and framing."
+                "explanation":  bias_explanation
             },
             "intent": {
                 "value":       intent_display,
