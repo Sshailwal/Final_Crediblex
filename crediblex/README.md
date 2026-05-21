@@ -104,7 +104,9 @@ pip install -r requirements.txt
 
 ### 3. Train the Model (First-time setup)
 
-> ⚠️ A trained model file (`model_v1.pth`) is required before the API can analyze articles. Skip this step if you already have the weights file.
+> ⚠️ Full neural inference requires a trained model file (`model_v1.pth`) in this folder. Model weight files are ignored by git, so copy it locally if you have one.
+>
+> If `model_v1.pth` is missing, the API automatically runs with the bundled classical fallback model in `models/bias_classifier_v2`. This is enough to run the app locally, but it is not the full DeBERTa model described below.
 
 ```bash
 python train.py
@@ -119,10 +121,10 @@ Training takes approximately **6–8 hours** on an RTX 4050 GPU (5 epochs, effec
 ```bash
 python api.py
 # or
-uvicorn api:app --reload --port 8000
+uvicorn api:app --reload --port 7860
 ```
 
-The API will be available at: `http://127.0.0.1:8000`
+The API will be available at: `http://127.0.0.1:7860`
 
 **API Endpoints:**
 
@@ -147,7 +149,26 @@ npm run dev
 
 The app will be available at: `http://localhost:5173`
 
-> Make sure the backend is running on port `8000` before using the frontend.
+> Make sure the backend is running on port `7860` before using the frontend.
+
+### Windows one-command startup
+
+From `crediblex/`, PowerShell users can start both services with:
+
+```powershell
+.\scripts\start-all.ps1
+```
+
+This script cleanly restarts anything using the project dev ports, waits for backend health at `http://127.0.0.1:7860/health`, then starts the Vite frontend at `http://localhost:5173`.
+
+You can also run each service separately:
+
+```powershell
+.\scripts\start-backend.ps1
+.\scripts\start-frontend.ps1
+```
+
+The frontend reads `VITE_API_BASE_URL` when present. Copy `frontend/.env.example` to `frontend/.env` only if you need to point the UI at a different backend URL.
 
 ---
 

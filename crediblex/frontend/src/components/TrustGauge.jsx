@@ -35,7 +35,7 @@ export default function TrustGauge({ score }) {
           cy={cy}
           r={r}
           fill="none"
-          stroke="rgba(255,255,255,0.07)"
+          stroke="rgba(17,24,39,0.08)"
           strokeWidth={strokeW}
           strokeLinecap="round"
           strokeDasharray={`${halfCirc} ${halfCirc * 10}`}
@@ -74,7 +74,7 @@ export default function TrustGauge({ score }) {
               dominantBaseline="middle"
               fontSize="8.5"
               fontFamily="Inter, sans-serif"
-              fill="rgba(255,255,255,0.28)"
+              fill="rgba(17,24,39,0.38)"
             >
               {v}
             </text>
@@ -87,13 +87,13 @@ export default function TrustGauge({ score }) {
         fontSize: '2.8rem',
         fontWeight: 800,
         color,
-        letterSpacing: '-0.03em',
+        letterSpacing: 0,
         lineHeight: 1,
         marginTop: -4,
       }}>
         {score}
       </div>
-      <div style={{ fontSize: '.72rem', color: 'rgba(255,255,255,.32)', marginTop: 3 }}>
+      <div style={{ fontSize: '.72rem', color: 'rgba(17,24,39,.45)', marginTop: 3 }}>
         / 100
       </div>
     </div>

@@ -1,25 +1,49 @@
-/* BiasSlider.jsx — Left-Center-Right slider visualization */
+/* BiasSlider.jsx — Five-point political bias visualization */
 export default function BiasSlider({ biasObj }) {
-  const label = biasObj?.value || 'Center';
-  const left = biasObj?.position ?? 50;
+  const rawLabel = String(biasObj?.label || biasObj?.value || "center")
+    .toLowerCase()
+    .replace(/\s+/g, "_");
 
-  let thumbColor = '#9ca3af';
-  if (label.includes('Left'))  thumbColor = '#ef4444';
-  if (label === 'Center')      thumbColor = '#22c55e';
-  if (label.includes('Right')) thumbColor = '#3b82f6';
+  const scale = {
+    far_left: { label: "Far Left", position: 0, color: "#dc2626" },
+    left: { label: "Left", position: 25, color: "#f97316" },
+    slightly_left: { label: "Slightly Left", position: 37.5, color: "#f59e0b" },
+    center: { label: "Center", position: 50, color: "#22c55e" },
+    slightly_right: { label: "Slightly Right", position: 62.5, color: "#06b6d4" },
+    right: { label: "Right", position: 75, color: "#3b82f6" },
+    far_right: { label: "Far Right", position: 100, color: "#4338ca" },
+  };
+
+  const active = scale[rawLabel] || scale.center;
+  const labels = ["Far Left", "Left", "Center", "Right", "Far Right"];
 
   return (
-    <div>
+    <div className="bias-meter">
+      <div className="bias-current" style={{ color: active.color }}>
+        {active.label}
+      </div>
       <div className="bias-track">
         <div
           className="bias-thumb"
-          style={{ left: `${left}%`, background: thumbColor, boxShadow: `0 0 0 3px ${thumbColor}44, 0 2px 8px rgba(0,0,0,.5)` }}
+          style={{
+            left: `${active.position}%`,
+            background: active.color,
+            boxShadow: `0 0 0 4px ${active.color}22, 0 8px 18px rgba(0,0,0,.12)`,
+          }}
         />
       </div>
       <div className="bias-labels">
-        <span style={{ color: label.includes('Left')   ? '#ef4444' : undefined }}>Left</span>
-        <span style={{ color: label === 'Center'       ? '#22c55e' : undefined }}>Center</span>
-        <span style={{ color: label.includes('Right')  ? '#3b82f6' : undefined }}>Right</span>
+        {labels.map((label) => (
+          <span
+            key={label}
+            style={{
+              color: label === active.label ? active.color : undefined,
+              fontWeight: label === active.label ? 700 : undefined,
+            }}
+          >
+            {label}
+          </span>
+        ))}
       </div>
     </div>
   );

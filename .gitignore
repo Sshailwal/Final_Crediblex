@@ -8,7 +8,7 @@ __pycache__/
 .env
 venv/
 env/
-
+env.example
 # IDE / Editor specific
 .vscode/
 .idea/
