@@ -38,34 +38,3 @@ NUM_EMOTION_LABELS   = 28  # GoEmotions 28-class multi-label
 # Extreme classes (0,4) are minority — upweight to fix 16:1 imbalance
 import torch as _t
 BIAS_CLASS_WEIGHTS = _t.tensor([2.5, 1.2, 0.7, 1.2, 2.5], dtype=torch.float32)
-
-# --- Domain Reputation Settings ---
-ENABLE_DOMAIN_REPUTATION = True
-TRUSTED_DOMAINS = {
-    # High-credibility global news agencies and media
-    "reuters.com": "trusted",
-    "apnews.com": "trusted",
-    "bbc.com": "trusted",
-    "bbc.co.uk": "trusted",
-    "nytimes.com": "trusted",
-    "thehindu.com": "trusted",
-    "indiatoday.in": "trusted",
-    "timesofindia.indiatimes.com": "trusted",
-    "hindustantimes.com": "trusted",
-    "ndtv.com": "trusted",
-    "deccanherald.com": "trusted",
-    "cnbctv18.com": "trusted",
-    "bloomberg.com": "trusted",
-    "afp.com": "trusted",
-    
-    # Official government/institutional suffixes & domains
-    ".gov": "official",
-    ".gov.in": "official",
-    "nic.in": "official",
-    ".edu": "academic",
-    
-    # Satirical sites
-    "theonion.com": "satire",
-    "babylonbee.com": "satire"
-}
-

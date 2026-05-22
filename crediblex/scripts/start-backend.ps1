@@ -23,4 +23,15 @@ Stop-PortProcess -TargetPort $Port
 
 Write-Host "Starting CredibleX backend on http://127.0.0.1:$Port"
 Set-Location $Root
-python -m uvicorn api:app --host 127.0.0.1 --port $Port
+
+if (Test-Path "$Root\venv\Scripts\activate.ps1") {
+    Write-Host "Activating virtual environment..."
+    . "$Root\venv\Scripts\activate.ps1"
+}
+
+try {
+    python -m uvicorn api:app --host 127.0.0.1 --port $Port
+} finally {
+    Write-Host "Process exited. Press Enter to close this window..."
+    Read-Host
+}

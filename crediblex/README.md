@@ -153,20 +153,22 @@ The app will be available at: `http://localhost:5173`
 
 ### Windows one-command startup
 
-From `crediblex/`, PowerShell users can start both services with:
+For Windows users, we have provided batch scripts that automatically bypass execution policies. 
+From `crediblex/`, you can start both services by running or double-clicking:
 
-```powershell
-.\scripts\start-all.ps1
+```cmd
+scripts\start-all.bat
 ```
 
 This script cleanly restarts anything using the project dev ports, waits for backend health at `http://127.0.0.1:7860/health`, then starts the Vite frontend at `http://localhost:5173`.
 
 You can also run each service separately:
 
-```powershell
-.\scripts\start-backend.ps1
-.\scripts\start-frontend.ps1
+```cmd
+scripts\start-backend.bat
+scripts\start-frontend.bat
 ```
+(PowerShell `.ps1` scripts are also available in the same folder if you prefer).
 
 The frontend reads `VITE_API_BASE_URL` when present. Copy `frontend/.env.example` to `frontend/.env` only if you need to point the UI at a different backend URL.
 

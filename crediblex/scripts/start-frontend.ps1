@@ -24,4 +24,9 @@ Stop-PortProcess -TargetPort $Port
 
 Write-Host "Starting CredibleX frontend on http://localhost:$Port"
 Set-Location $FrontendRoot
-npm run dev -- --host 127.0.0.1 --port $Port
+try {
+    npx vite --host 127.0.0.1 --port $Port
+} finally {
+    Write-Host "Process exited. Press Enter to close this window..."
+    Read-Host
+}

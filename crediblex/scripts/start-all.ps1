@@ -35,7 +35,7 @@ $backend = Start-Process powershell -ArgumentList @(
     "-ExecutionPolicy", "Bypass",
     "-File", $BackendScript,
     "-Port", $BackendPort
-) -WorkingDirectory $Root -RedirectStandardOutput $BackendLog -RedirectStandardError $BackendErrorLog -WindowStyle Hidden -PassThru
+) -WorkingDirectory $Root -PassThru
 
 $healthUrl = "http://127.0.0.1:$BackendPort/health"
 $backendReady = $false
@@ -65,7 +65,7 @@ $frontend = Start-Process powershell -ArgumentList @(
     "-ExecutionPolicy", "Bypass",
     "-File", $FrontendScript,
     "-Port", $FrontendPort
-) -WorkingDirectory (Join-Path $Root "frontend") -RedirectStandardOutput $FrontendLog -RedirectStandardError $FrontendErrorLog -WindowStyle Hidden -PassThru
+) -WorkingDirectory (Join-Path $Root "frontend") -PassThru
 
 $frontendUrl = "http://127.0.0.1:$FrontendPort"
 $frontendReady = $false

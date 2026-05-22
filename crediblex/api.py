@@ -1,5 +1,7 @@
 import json, time
 from datetime import datetime, timezone
+from dotenv import load_dotenv
+load_dotenv()
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 from fastapi import FastAPI, HTTPException
@@ -83,12 +85,16 @@ def _shape_response(result: dict, metadata: dict = None) -> dict:
     # ── Key Findings ──────────────────────────────────────────────────────────
     findings = []
 
-    if fact_score >= 0.7:
-        findings.append({"type": "good", "icon": "✅", "text": f"Factuality score is high ({round(fact_score*100)}%), indicating mostly verified claims."})
-    elif fact_score >= 0.4:
-        findings.append({"type": "warn", "icon": "⚠️", "text": f"Factuality score is moderate ({round(fact_score*100)}%). Some claims may be unverified."})
+    llm_findings = result["factuality"].get("findings", [])
+    if llm_findings:
+        findings.extend(llm_findings)
     else:
-        findings.append({"type": "bad", "icon": "🚨", "text": f"Low factuality score ({round(fact_score*100)}%). Content may contain misinformation."})
+        if fact_score >= 0.7:
+            findings.append({"type": "good", "icon": "✅", "text": f"Factuality score is high ({round(fact_score*100)}%), indicating mostly verified claims."})
+        elif fact_score >= 0.4:
+            findings.append({"type": "warn", "icon": "⚠️", "text": f"Factuality score is moderate ({round(fact_score*100)}%). Some claims may be unverified."})
+        else:
+            findings.append({"type": "bad", "icon": "🚨", "text": f"Low factuality score ({round(fact_score*100)}%). Content may contain misinformation."})
 
     if bias_raw == "center":
         findings.append({"type": "good", "icon": "⚖️", "text": "No strong political bias detected; reporting appears broadly balanced or centrist."})
@@ -127,7 +133,7 @@ def _shape_response(result: dict, metadata: dict = None) -> dict:
                 "value":       fact_score,
                 "label":       fact_label,
                 "weight":      "50%",
-                "explanation": f"The model scored this content {round(fact_score*100)}% on factuality based on language patterns, claim structure, and comparison with known factual sources."
+                "explanation": result["factuality"].get("explanation") or f"The model scored this content {round(fact_score*100)}% on factuality based on language patterns, claim structure, and comparison with known factual sources."
             },
             "bias": {
                 "value":        bias_display,

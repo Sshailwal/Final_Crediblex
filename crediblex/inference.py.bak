@@ -124,78 +124,6 @@ def _factuality_label(score: float) -> str:
     if score >= 0.2: return "barely_true"
     return "false"
 
-def evaluate_domain_credibility(urls: list[str]) -> dict:
-    """
-    Parses a list of URLs and checks them against config.TRUSTED_DOMAINS.
-    Returns credibility modifiers and lists of matched trusted/satire domains.
-    """
-    from config import TRUSTED_DOMAINS
-    from urllib.parse import urlparse
-    import re
-
-    matched_trusted = []
-    matched_official = []
-    matched_satire = []
-    score_modifier = 0.0
-
-    for url in urls:
-        if not url:
-            continue
-        try:
-            if url.startswith("//"):
-                url = "https:" + url
-            elif not url.startswith("http://") and not url.startswith("https://"):
-                url = "https://" + url
-                
-            parsed = urlparse(url)
-            netloc = parsed.netloc.lower()
-            if not netloc:
-                continue
-
-            if ":" in netloc:
-                netloc = netloc.split(":")[0]
-
-            if netloc.startswith("www."):
-                netloc = netloc[4:]
-
-            matched = False
-            for rule, category in TRUSTED_DOMAINS.items():
-                if rule.startswith("."):
-                    if netloc.endswith(rule) or f"{rule}." in netloc:
-                        if category == "official":
-                            matched_official.append(rule)
-                            score_modifier += 0.15
-                        elif category == "academic":
-                            matched_trusted.append(rule)
-                            score_modifier += 0.08
-                        matched = True
-                        break
-                else:
-                    if netloc == rule or netloc.endswith("." + rule):
-                        if category == "trusted":
-                            matched_trusted.append(rule)
-                            score_modifier += 0.08
-                        elif category == "official":
-                            matched_official.append(rule)
-                            score_modifier += 0.15
-                        elif category == "satire":
-                            matched_satire.append(rule)
-                            score_modifier -= 0.60
-                        matched = True
-                        break
-        except Exception:
-            pass
-
-    matched_trusted = list(sorted(set(matched_trusted)))
-    matched_official = list(sorted(set(matched_official)))
-    matched_satire = list(sorted(set(matched_satire)))
-
-    return {
-        "score_modifier": max(-0.80, min(0.25, score_modifier)),
-        "trusted_sources": matched_trusted + matched_official,
-        "satire_sources": matched_satire
-    }
-
 def run_inference(text: str) -> dict:
     from src.fact_check_api import check_factuality_with_llm
     llm_result = check_factuality_with_llm(text)
@@ -276,32 +204,6 @@ def run_inference(text: str) -> dict:
         fact_score_calibrated = (fact_score - FACT_FLOOR) / (FACT_CEILING - FACT_FLOOR)
         fact_score_calibrated = float(max(0.0, min(1.0, fact_score_calibrated)))
 
-    # --- Domain Reputation Evaluation ---
-    from config import ENABLE_DOMAIN_REPUTATION
-    urls_in_text = re.findall(r'https?://(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?::\d+)?(?:/[^\s]*)?', text)
-    search_urls = llm_result.get("search_urls", []) if llm_result is not None else []
-    all_urls = list(set(urls_in_text + search_urls))
-    
-    reputation_findings = []
-    if ENABLE_DOMAIN_REPUTATION and all_urls:
-        rep_eval = evaluate_domain_credibility(all_urls)
-        fact_score_calibrated = max(0.0, min(1.0, fact_score_calibrated + rep_eval["score_modifier"]))
-        
-        if rep_eval["trusted_sources"]:
-            sources_str = ", ".join(rep_eval["trusted_sources"])
-            reputation_findings.append({
-                "type": "good",
-                "icon": "✅",
-                "text": f"Verified / reported by trusted sources: {sources_str}"
-            })
-        if rep_eval["satire_sources"]:
-            sources_str = ", ".join(rep_eval["satire_sources"])
-            reputation_findings.append({
-                "type": "bad",
-                "icon": "🚨",
-                "text": f"Content references known satirical source: {sources_str}"
-            })
-
     intent_probs  = torch.softmax(intent_pooled, dim=0).tolist()
     intent_class  = int(torch.argmax(intent_pooled).item())
     intent_conf   = float(intent_probs[intent_class])
@@ -333,13 +235,6 @@ def run_inference(text: str) -> dict:
     elif trust_score >= 20: verdict = "Low Credibility"
     else: verdict = "Fabricated / Fake"
 
-    fact_label = llm_result["label"] if llm_result is not None else _factuality_label(fact_score_calibrated)
-    if ENABLE_DOMAIN_REPUTATION and all_urls and rep_eval["satire_sources"]:
-        fact_label = "false"
-
-    fact_findings = llm_result["findings"] if llm_result is not None else []
-    fact_findings = reputation_findings + fact_findings
-
     return {
         "windows_processed": len(windows),
         "trust_score": trust_score,
@@ -352,9 +247,9 @@ def run_inference(text: str) -> dict:
         },
         "factuality": {
             "score":  round(fact_score_calibrated, 3),
-            "label":  fact_label,
+            "label":  llm_result["label"] if llm_result is not None else _factuality_label(fact_score_calibrated),
             "explanation": llm_result["explanation"] if llm_result is not None else None,
-            "findings": fact_findings
+            "findings": llm_result["findings"] if llm_result is not None else []
         },
         "intent": {
             "label":      intent_data["label"],
@@ -440,33 +335,6 @@ def _run_classical_inference(text: str, loaded: dict, llm_result: dict = None) -
         fact_score = llm_result["factuality_score"]
     else:
         fact_score = _heuristic_factuality(text)
-
-    # --- Domain Reputation Evaluation ---
-    from config import ENABLE_DOMAIN_REPUTATION
-    urls_in_text = re.findall(r'https?://(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?::\d+)?(?:/[^\s]*)?', text)
-    search_urls = llm_result.get("search_urls", []) if llm_result is not None else []
-    all_urls = list(set(urls_in_text + search_urls))
-    
-    reputation_findings = []
-    if ENABLE_DOMAIN_REPUTATION and all_urls:
-        rep_eval = evaluate_domain_credibility(all_urls)
-        fact_score = max(0.0, min(1.0, fact_score + rep_eval["score_modifier"]))
-        
-        if rep_eval["trusted_sources"]:
-            sources_str = ", ".join(rep_eval["trusted_sources"])
-            reputation_findings.append({
-                "type": "good",
-                "icon": "✅",
-                "text": f"Verified / reported by trusted sources: {sources_str}"
-            })
-        if rep_eval["satire_sources"]:
-            sources_str = ", ".join(rep_eval["satire_sources"])
-            reputation_findings.append({
-                "type": "bad",
-                "icon": "🚨",
-                "text": f"Content references known satirical source: {sources_str}"
-            })
-
     intent_label, intent_conf = _heuristic_intent(text)
     top_emotions = _heuristic_emotions(text)
     trust_score = _calculate_credibility(
@@ -487,13 +355,6 @@ def _run_classical_inference(text: str, loaded: dict, llm_result: dict = None) -
     else:
         verdict = "Fabricated / Fake"
 
-    fact_label = llm_result["label"] if llm_result is not None else _factuality_label(fact_score)
-    if ENABLE_DOMAIN_REPUTATION and all_urls and rep_eval["satire_sources"]:
-        fact_label = "false"
-        
-    fact_findings = llm_result["findings"] if llm_result is not None else []
-    fact_findings = reputation_findings + fact_findings
-
     return {
         "windows_processed": 1,
         "trust_score": trust_score,
@@ -505,9 +366,9 @@ def _run_classical_inference(text: str, loaded: dict, llm_result: dict = None) -
         },
         "factuality": {
             "score": round(fact_score, 3),
-            "label": fact_label,
+            "label": llm_result["label"] if llm_result is not None else _factuality_label(fact_score),
             "explanation": llm_result["explanation"] if llm_result is not None else None,
-            "findings": fact_findings
+            "findings": llm_result["findings"] if llm_result is not None else []
         },
         "intent": {
             "label": intent_label,
